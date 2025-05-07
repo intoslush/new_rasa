@@ -1,0 +1,8 @@
+easydict 
+pyyaml
+regex 
+prettytable
+ftfy 
+transformers
+timm
+ruamel.yaml
