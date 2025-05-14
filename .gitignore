@@ -148,4 +148,5 @@ re_id/
 /re_id/**
 *.pth
 .vscode/*
-./bert-base-uncased
+bert-base-uncased/
+logs/

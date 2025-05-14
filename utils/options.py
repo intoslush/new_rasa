@@ -46,7 +46,7 @@ def get_args():
     # parser.add_argument("--cmt_depth", type=int, default=4, help="cross modal transformer self attn layers")
     # parser.add_argument("--masked_token_rate", type=float, default=0.8, help="masked token rate for mlm task")
     # parser.add_argument("--masked_token_unchanged_rate", type=float, default=0.1, help="masked token unchanged rate")
-    # parser.add_argument("--lr_factor", type=float, default=5.0, help="lr factor for random init self implement module")
+    parser.add_argument("--lr_factor", type=float, default=5.0, help="lr factor for random init self implement module")
     # parser.add_argument("--MLM", default=False, action='store_true', help="whether to use Mask Language Modeling dataset")
 
     # ######################## loss settings ########################
@@ -61,14 +61,14 @@ def get_args():
     # parser.add_argument("--text_length", type=int, default=77)  ########  77
     # parser.add_argument("--vocab_size", type=int, default=49408)
 
-    # ######################## solver ########################
-    # parser.add_argument("--optimizer", type=str, default="Adam", help="[SGD, Adam, Adamw]")
-    # parser.add_argument("--lr", type=float, default=1e-5)
-    # parser.add_argument("--bias_lr_factor", type=float, default=2.)
-    # parser.add_argument("--weight_decay", type=float, default=4e-5)
-    # parser.add_argument("--weight_decay_bias", type=float, default=0.)
-    # parser.add_argument("--alpha", type=float, default=0.9)
-    # parser.add_argument("--beta", type=float, default=0.999)
+    ######################## solver ########################
+    parser.add_argument("--optimizer", type=str, default="Adam", help="[SGD, Adam, Adamw]")
+    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--bias_lr_factor", type=float, default=2.)
+    parser.add_argument("--weight_decay", type=float, default=4e-5)
+    parser.add_argument("--weight_decay_bias", type=float, default=0.)
+    parser.add_argument("--alpha", type=float, default=0.9)
+    parser.add_argument("--beta", type=float, default=0.999)
     
     # ######################## scheduler ########################
     # parser.add_argument("--num_epoch", type=int, default=60)

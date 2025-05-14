@@ -54,8 +54,18 @@ class ALBEF(nn.Module):
         # Queues
         self._init_queues(embed_dim)
 
-    def forward(self, image1, image2, text1, text2, alpha, idx, replace):#其中text2是概率同一个id的其他图片的描述,img1和img2是同一个图片的两个不同的增广
+    def forward(self, batch,alpha,config):#其中text2是概率同一个id的其他图片的描述,img1和img2是同一个图片的两个不同的增广
         # extract image features
+        # image1, image2, text1, text2, alpha, idx, replace
+        image1=batch['image1']
+        image2=batch['image2']
+        text1=self.tokenizer(batch['caption1'], padding='longest', max_length=config['max_words'], return_tensors="pt").to(image1.device)
+        text2=self.tokenizer(batch['caption2'], padding='longest', max_length=config['max_words'], return_tensors="pt").to(image1.device)
+        
+        idx=batch['person_id']
+        replace=batch['replace_flag']
+        pseudo_label=batch['pseudo_label']
+
         image_embeds = self.visual_encoder(image1)#(13,577,768)
         image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(image1.device)#注意力掩码全一表示所有图像token都应该被关注
         image_feat = F.normalize(self.vision_proj(image_embeds[:, 0, :]), dim=-1)#用于取cls token的特征,shape(13,577)
@@ -227,9 +237,10 @@ class ALBEF(nn.Module):
     @torch.no_grad()
     def _dequeue_and_enqueue(self, image_feat, text_feat, idx):
         # gather keys before updating queue
-        image_feats = concat_all_gather(image_feat)
-        text_feats = concat_all_gather(text_feat)
-        idxs = concat_all_gather(idx)
+        if torch.distributed.is_initialized():
+            image_feats = concat_all_gather(image_feat)
+            text_feats = concat_all_gather(text_feat)
+            idxs = concat_all_gather(idx)
         batch_size = image_feats.shape[0]
         ptr = int(self.queue_ptr)
         # replace the keys at ptr (dequeue and enqueue)

@@ -6,3 +6,7 @@ ftfy
 transformers
 timm
 ruamel.yaml
+scipy 
+scikit-learn 
+faiss-gpu
+pip install "numpy<2.0"

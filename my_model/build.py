@@ -10,10 +10,9 @@ import ruamel.yaml as YAML
 from .vit import interpolate_pos_embed 
 import logging
 
-# 获取当前模块的logger
-logger = logging.getLogger(__name__)
+
  
-def bulid_tokenizer(tokenizer_path="./bert-base-uncased"): 
+def bulid_tokenizer(tokenizer_path="./bert-base-uncased",logger=None): 
     # 设置本地模型路径 
     local_model_path = "./bert-base-uncased" 
     # 检查是否已存在模型文件 
@@ -37,11 +36,12 @@ def bulid_tokenizer(tokenizer_path="./bert-base-uncased"):
     
  
 def build_model(args): 
-    tokenizer = bulid_tokenizer(args.tokenizer_path) 
+    logger = logging.getLogger(args.name)
+    tokenizer = bulid_tokenizer(args.tokenizer_path,logger) 
     yaml = YAML.YAML(typ='rt') 
     config = yaml.load(open(args.config, 'r')) 
     model = ALBEF(config=config, text_encoder=args.tokenizer_path, tokenizer=tokenizer) 
- 
+    
     checkpoint = torch.load(args.checkpoint, map_location='cpu') 
     state_dict = checkpoint['model'] 
     pos_embed_reshaped = interpolate_pos_embed(state_dict['visual_encoder.pos_embed'], model.visual_encoder) 
