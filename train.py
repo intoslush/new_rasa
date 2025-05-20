@@ -44,6 +44,7 @@ if __name__ == '__main__':
         model = torch.nn.parallel.DistributedDataParallel(
             model,
             device_ids=[args.local_rank],
+            find_unused_parameters=True
         )
         logger.info("模型分布式化成功")
     else:

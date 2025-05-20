@@ -9,4 +9,4 @@ ruamel.yaml
 scipy 
 scikit-learn 
 faiss-gpu
-pip install "numpy<2.0"
+numpy<2.0

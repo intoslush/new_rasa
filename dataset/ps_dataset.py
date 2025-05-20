@@ -40,7 +40,7 @@ class ps_train_dataset(Dataset):
         self.mode = "train"
         
     def set_pseudo_labels(self, labels):
-        assert len(labels) == len(self.pairs), "标签数量和样本数量不一致"
+        assert len(labels) == len(self.pairs), f"标签数量{len(labels)}和样本数量不一致{len(self.pairs)}"
         print("成功将伪标签写入数据集中")
         self.pseudo_labels = labels
         self.valid_indices = [i for i, label in enumerate(labels) if label != -1]

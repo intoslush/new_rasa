@@ -77,7 +77,7 @@ def cluster_begin_epoch(train_loader, model, args,tokenizer = None,logger = None
         dataset_len = len(train_loader.dataset)
         num_noise = (image_pseudo_labels == -1).sum()
         num_clusters = len(set(image_pseudo_labels)) - (1 if -1 in image_pseudo_labels else 0)
-        logger.info(f"Dataset 总长度: {dataset_len}")
+        logger.info(f"Dataset 总长度: {dataset_len},最终输出的伪标签长度: {len(image_pseudo_labels)}")
         logger.info(f"聚类数（不含 -1）: {num_clusters}")
         logger.info(f"-1 (未归入任何簇) 的数量: {num_noise}\n")
     del image_bank

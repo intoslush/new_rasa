@@ -4,6 +4,7 @@ import time
 import torch.nn.functional as F
 import datetime
 import torch.distributed as dist
+import  logging
 
 @torch.no_grad()
 def itm_eval(scores_t2i, img2person, txt2person, eval_mAP):
@@ -50,9 +51,10 @@ def itm_eval(scores_t2i, img2person, txt2person, eval_mAP):
 def evaluation(model, data_loader, tokenizer, device, config,args):
     # evaluate
     model.eval()
-    metric_logger = utils.MetricLogger(delimiter="  ")
+    logger= logging.getLogger(args.name)
+    # metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Evaluation:'
-    print('Computing features for evaluation...')
+    logger.info(f"{header} Start")
     start_time = time.time()
     # extract text features
     texts = data_loader.dataset.text
@@ -76,8 +78,9 @@ def evaluation(model, data_loader, tokenizer, device, config,args):
     # extract image features
     image_feats = []
     image_embeds = []
-    for image, img_id in data_loader:
-        image = image.to(device)
+    for batch in data_loader:
+        image=batch["image"].to(device)
+        img_id=batch["index"].to(device)
         image_feat = model.visual_encoder(image)
         image_embed = model.vision_proj(image_feat[:, 0, :])
         image_embed = F.normalize(image_embed, dim=-1)
@@ -94,20 +97,28 @@ def evaluation(model, data_loader, tokenizer, device, config,args):
     step = sims_matrix.size(0) // num_tasks + 1
     start = rank * step
     end = min(sims_matrix.size(0), start + step)
-    for i, sims in enumerate(metric_logger.log_every(sims_matrix[start:end], 50, header)):
+
+    for i in range(start, end):
+        sims = sims_matrix[i]
+        if (i - start) % 1000 == 0:
+            logger.info(f"{header} [{i - start}/{end - start}]")
+
         topk_sim, topk_idx = sims.topk(k=config['k_test'], dim=0)
         topk_idx = topk_idx.to(image_feats.device)
         encoder_output = image_feats[topk_idx]
         encoder_att = torch.ones(encoder_output.size()[:-1], dtype=torch.long).to(device)
-        output = model.text_encoder.bert(encoder_embeds=text_feats[start + i].repeat(config['k_test'], 1, 1),
-                                         attention_mask=text_atts[start + i].repeat(config['k_test'], 1),
-                                         encoder_hidden_states=encoder_output.to(device),
-                                         encoder_attention_mask=encoder_att,
-                                         return_dict=True,
-                                         mode='fusion'
-                                         )
+        
+        output = model.text_encoder.bert(
+            encoder_embeds=text_feats[i].repeat(config['k_test'], 1, 1),
+            attention_mask=text_atts[i].repeat(config['k_test'], 1),
+            encoder_hidden_states=encoder_output.to(device),
+            encoder_attention_mask=encoder_att,
+            return_dict=True,
+            mode='fusion'
+        )
+        
         score = model.itm_head(output.last_hidden_state[:, 0, :])[:, 1]
-        score_matrix_t2i[start + i, topk_idx] = score
+        score_matrix_t2i[i, topk_idx] = score
     if args.distributed:
         dist.barrier()
         torch.distributed.all_reduce(score_matrix_t2i, op=torch.distributed.ReduceOp.SUM)

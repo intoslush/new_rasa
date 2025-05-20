@@ -64,8 +64,8 @@ class ALBEF(nn.Module):
         
         idx=batch['person_id']
         replace=batch['replace_flag']
-        pseudo_label=batch['pseudo_label']
-
+        # pseudo_label=batch['pseudo_label']
+        idx=batch['pseudo_label']
         image_embeds = self.visual_encoder(image1)#(13,577,768)
         image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(image1.device)#注意力掩码全一表示所有图像token都应该被关注
         image_feat = F.normalize(self.vision_proj(image_embeds[:, 0, :]), dim=-1)#用于取cls token的特征,shape(13,577)
@@ -241,6 +241,10 @@ class ALBEF(nn.Module):
             image_feats = concat_all_gather(image_feat)
             text_feats = concat_all_gather(text_feat)
             idxs = concat_all_gather(idx)
+        else:
+            image_feats = image_feat
+            text_feats = text_feat
+            idxs = idx
         batch_size = image_feats.shape[0]
         ptr = int(self.queue_ptr)
         # replace the keys at ptr (dequeue and enqueue)
