@@ -16,7 +16,9 @@ from utils.comm import get_rank, synchronize
 
 if __name__ == '__main__':
     args = get_args()
-    set_seed(1+get_rank())
+    # fix the seed for reproducibility
+    seed = args.seed + get_rank()
+    set_seed(seed)
     name = args.name
 
     num_gpus = int(os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1

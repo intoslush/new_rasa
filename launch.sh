@@ -13,5 +13,5 @@ torchrun \
   --checkpoint ./data/ALBEF/ALBEF.pth \
   --dataset_name $DATASET_NAME \
   --root_dir ./re_id \
-  --num_epoch 5
+  --num_epoch 25
   # --config configs/PS_cuhk_pedes.yaml \

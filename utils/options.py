@@ -28,7 +28,7 @@ def get_args():
     parser.add_argument("--local_rank", type=int, default=int(os.getenv("LOCAL_RANK", 0)))
     parser.add_argument("--name", default="baseline", help="experiment name to save")
     parser.add_argument("--output_dir", default="logs")
-    parser.add_argument("--log_period", default=100)
+    parser.add_argument("--log_period", default=500)
     parser.add_argument("--eval_period", default=1)
     parser.add_argument("--val_dataset", default="test") # use val set when evaluate, if test use test set
     # parser.add_argument("--resume", default=False, action='store_true')
@@ -101,5 +101,5 @@ def set_seed(seed=0):
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
-    torch.backends.cudnn.deterministic = True
+    # torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = True

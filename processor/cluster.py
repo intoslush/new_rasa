@@ -2,6 +2,7 @@ import torch.nn.functional as F
 from .faiss_rerank import compute_jaccard_distance
 from sklearn.cluster import DBSCAN
 import torch
+import os
 
 def cluster_begin_epoch(train_loader, model, args,tokenizer = None,logger = None):
     device = "cuda"
@@ -9,9 +10,18 @@ def cluster_begin_epoch(train_loader, model, args,tokenizer = None,logger = None
     max_size = len(train_loader.dataset)  #这个是所有的图片和描述对的数量共计6800对左右     
     image_bank = torch.zeros((max_size, feature_size)).to(device)
     index = 0
-
     model.to(device)
     model = model.eval()
+
+    test=True
+    if test:
+        save_path="./logs/pseudo_labels.pt"
+        if os.path.exists(save_path):
+            logger.info(f"检测到已保存的伪标签文件 {save_path}，直接加载...")
+            image_pseudo_labels = torch.load(save_path, weights_only=False)
+            logger.info(f"加载完成，伪标签长度: {len(image_pseudo_labels)}")
+            return image_pseudo_labels
+
     #TODO这玩意我以后一定改
     logger.info("开始计算伪标签")
     with torch.no_grad():
@@ -62,7 +72,7 @@ def cluster_begin_epoch(train_loader, model, args,tokenizer = None,logger = None
 
         try:
             
-            image_rerank_dist = compute_jaccard_distance(image_bank, k1=30, k2=6, search_option=3)  
+            image_rerank_dist = compute_jaccard_distance(image_bank, k1=30, k2=6, search_option=0 )  
         except Exception as e:
             logger.info(f" 计算距离出错：{e}")     
         # image_rerank_dist = compute_jaccard_distance(image_bank, k1=30, k2=6, search_option=0)  
@@ -81,4 +91,8 @@ def cluster_begin_epoch(train_loader, model, args,tokenizer = None,logger = None
         logger.info(f"聚类数（不含 -1）: {num_clusters}")
         logger.info(f"-1 (未归入任何簇) 的数量: {num_noise}\n")
     del image_bank
+    if not os.path.exists(save_path):
+        if not args.distributed or (args.distributed and torch.distributed.get_rank() == 0):
+            torch.save(image_pseudo_labels, save_path)
+            logger.info(f"伪标签已保存至 {save_path}")
     return image_pseudo_labels

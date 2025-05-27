@@ -37,9 +37,9 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer,clu
         "txt_acc": AverageMeter(),
         "mlm_acc": AverageMeter()
     }
-
-    tb_writer = SummaryWriter(log_dir=args.output_dir)
-
+    if args.distributed and get_rank() == 0:
+        tb_writer = SummaryWriter(log_dir=args.output_dir)
+        global_step =0
     best_top1 = 0.0
     yaml = YAML.YAML(typ='rt') 
     config = yaml.load(open(args.config, 'r')) 
@@ -66,26 +66,32 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer,clu
     # train
     for epoch in range(start_epoch, num_epoch + 1):
         # 生成为标签,并筛选处理sample
-        cluster_loader.dataset.mode = 'cluster'
-        image_pseudo_labels = cluster_begin_epoch(cluster_loader, model, args,None,logger)
-        image_num_cluster = len(set(image_pseudo_labels)) - (1 if -1 in image_pseudo_labels else 0)
-        logger.info("==> Statistics for epoch [{}]: {} image clusters,total{}".format(epoch, image_num_cluster,len(image_pseudo_labels)))
-        train_loader.dataset.mode = 'train'
-        train_loader.dataset.set_pseudo_labels(image_pseudo_labels)
-        if epoch > 0:
-            scheduler.step(epoch + warmup_steps)
-        if args.distributed:
-            dist.barrier()
-            train_loader.sampler.set_valid_indices(train_loader.dataset.valid_indices)
-            train_loader.sampler.set_epoch(epoch)
-
+        with torch.no_grad():
+            cluster_loader.dataset.mode = 'cluster'
+            image_pseudo_labels_np = cluster_begin_epoch(cluster_loader, model, args,None,logger)
+            image_num_cluster = len(set(image_pseudo_labels_np)) - (1 if -1 in image_pseudo_labels_np else 0)
+            logger.info("==> Statistics for epoch [{}]: {} image clusters,total{}".format(epoch, image_num_cluster,len(image_pseudo_labels_np)))
+            image_pseudo_labels = torch.tensor(image_pseudo_labels_np).long().to(device)
+            torch.distributed.broadcast(image_pseudo_labels, src=0)
+            train_loader.dataset.mode = 'train'
+            train_loader.dataset.set_pseudo_labels(image_pseudo_labels.cpu())
+            if epoch > 0:
+                scheduler.step(epoch + warmup_steps)
+            if args.distributed:
+                dist.barrier()
+                train_loader.sampler.set_valid_indices(train_loader.dataset.valid_indices)
+                train_loader.sampler.set_epoch(epoch)
+                
 
         # 开始每个batch的训练
         start_time = time.time()
         for meter in meters.values():
             meter.reset()
         model.train()
+        # print("rank: ", get_rank(), "epoch: ", epoch,"用于定位为什么卡主1")
         logger.info("开始epoch {}的mini batch循环".format(epoch))
+        if epoch > 0:
+            scheduler.step(epoch + warmup_steps)
         for n_iter, batch in enumerate(train_loader):
             batch = {
                 k: v.to(device) if hasattr(v, 'to') else v
@@ -95,20 +101,42 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer,clu
                 alpha = config['alpha']
             else:
                 alpha = config['alpha'] * min(1.0, n_iter / len(train_loader))
-            # logger.info("开始poch {}的第{}个batch的loss计算".format(epoch, n_iter))   
+            if n_iter % log_period == 0:
+                # print("rank {} epoch {} iter {}:".format(get_rank(),epoch, n_iter))
+                logger.info("开始epoch {}的第{}/{}个batch的loss计算".format(epoch, n_iter,len(train_loader)))   
             loss_cl, loss_pitm, loss_mlm, loss_prd, loss_mrtd = model(batch,alpha,config) 
-            # logger.info(print(f"{loss_cl.requires_grad}, {loss_pitm.requires_grad}, {loss_mlm.requires_grad}, {loss_prd.requires_grad} ,{loss_mrtd.requires_grad}"))
-            # logger.info("完成epoch {}的第{}个batch的loss计算".format(epoch, n_iter)) 
             # 计算总损失
             loss = 0.
             for j, los in enumerate((loss_cl, loss_pitm, loss_mlm, loss_prd, loss_mrtd)):
                 loss += config['weights'][j] * los
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
 
-        if epoch == 0 and n_iter % step_size == 0 and n_iter <= warmup_iterations:
+            if args.distributed and get_rank() == 0:
+                global_step=global_step + 1
+                tb_writer.add_scalars("LossGroup", {
+                "CL": loss_cl.item(),
+                "PITM": loss_pitm.item(),
+                "MLM": loss_mlm.item(),
+                "PRD": loss_prd.item(),
+                "MRTD": loss_mrtd.item(),
+                "Total": loss.item()
+                }, global_step)
+
+            optimizer.zero_grad()
+            # torch.autograd.set_detect_anomaly(True)
+            dist.barrier()
+            loss.backward()
+            # torch.autograd.set_detect_anomaly(False)
+            optimizer.step()
+            
+            if epoch == 0 and n_iter % step_size == 0 and n_iter <= warmup_iterations:
                 scheduler.step(n_iter // step_size)
+            if args.distributed and get_rank() == 0:
+                current_lr = optimizer.param_groups[0]['lr']
+                tb_writer.add_scalars("Meta", {
+                    "LearningRate": current_lr,
+                    "Epoch": epoch,
+                }, global_step)
+            
 
         logger.info("----------epoch {}训练完成-------------".format(epoch))
         if epoch >= config['eval_epoch'] or args.evaluate:
@@ -145,7 +173,9 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer,clu
                         best_log = log_stats
 
         dist.barrier()
-        torch.cuda.empty_cache()
+
+    if args.distributed and get_rank() == 0:
+        tb_writer.close()
 
         
 
