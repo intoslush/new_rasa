@@ -89,27 +89,19 @@ class ALBEF(nn.Module):
                                                      return_dict=True, mode='text')
             text_feat_m = F.normalize(self.text_proj_m(text_output_m.last_hidden_state[:, 0, :]), dim=-1)
             text_feat_all = torch.cat([text_feat_m.t(), self.text_queue.clone().detach()], dim=1)
-
             sim_i2t_m = image_feat_m @ text_feat_all / self.temp#计算当前批次与队列的相似得分
             sim_t2i_m = text_feat_m @ image_feat_all / self.temp
-            sim_i2i_m = image_feat_m @ image_feat_all / self.temp
-            sim_t2t_m = text_feat_m @ text_feat_all / self.temp
-
             sim_i2t_targets = alpha * F.softmax(sim_i2t_m, dim=1) + (1 - alpha) * sim_targets#用来让标签匹配变软
             sim_t2i_targets = alpha * F.softmax(sim_t2i_m, dim=1) + (1 - alpha) * sim_targets
-            sim_i2i_targets = alpha * F.softmax(sim_i2i_m, dim=1) + (1 - alpha) * sim_targets
-            sim_t2t_targets = alpha * F.softmax(sim_t2t_m, dim=1) + (1 - alpha) * sim_targets
 
         sim_i2t = image_feat @ text_feat_all / self.temp
         sim_t2i = text_feat @ image_feat_all / self.temp
-        sim_i2i = image_feat @ image_feat_all / self.temp
-        sim_t2t = text_feat @ text_feat_all / self.temp
+
 
         loss_i2t = -torch.sum(F.log_softmax(sim_i2t, dim=1) * sim_i2t_targets, dim=1).mean()
         loss_t2i = -torch.sum(F.log_softmax(sim_t2i, dim=1) * sim_t2i_targets, dim=1).mean()
-        loss_i2i = -torch.sum(F.log_softmax(sim_i2i, dim=1) * sim_i2i_targets, dim=1).mean()
-        loss_t2t = -torch.sum(F.log_softmax(sim_t2t, dim=1) * sim_t2t_targets, dim=1).mean()
-        loss_cl = (loss_i2t + loss_t2i + loss_i2i + loss_t2t) / 4
+
+        loss_cl = (loss_i2t + loss_t2i ) / 2
 
         self._dequeue_and_enqueue(image_feat_m, text_feat_m, idx)
 
@@ -164,62 +156,8 @@ class ALBEF(nn.Module):
         #与融合后的标签直接做交叉熵
         loss_pitm = F.cross_entropy(vl_output, itm_labels)
         
-        
-        # Positive Relation Detection
-        prd_output = self.prd_head(output_pos.last_hidden_state[:, 0, :])
-        loss_prd = F.cross_entropy(prd_output, replace)
 
-        # Sensitivity-aware Learning: Masked Language Modeling + Momentum-based Replaced Token Detection
-        input_ids = text1.input_ids.clone()
-        labels = input_ids.clone()
-        mrtd_input_ids = input_ids.clone()
-        # Masked Language Modeling
-        probability_matrix = torch.full(labels.shape, self.mlm_probability)#每个都有相同的概率被掩码
-        input_ids, labels = self.mask(input_ids, self.text_encoder.config.vocab_size, targets=labels, probability_matrix=probability_matrix)
-        with torch.no_grad():
-            logits_m = self.text_encoder_m(input_ids,
-                                           attention_mask=text1.attention_mask,
-                                           encoder_hidden_states=image_embeds_m,
-                                           encoder_attention_mask=image_atts,
-                                           return_dict=True,
-                                           return_logits=True,
-                                           )#(13,577,30522)
-            prediction = F.softmax(logits_m, dim=-1)#(13,577,30522)
-        #输入的是mask后的文本
-        mlm_output = self.text_encoder(input_ids,
-                                       attention_mask=text1.attention_mask,
-                                       encoder_hidden_states=image_embeds,
-                                       encoder_attention_mask=image_atts,
-                                       return_dict=True,
-                                       labels=labels,
-                                       soft_labels=prediction,
-                                       alpha=alpha
-                                       )
-        loss_mlm = mlm_output.loss
-        # Momentum-based Replaced Token Detection
-        with torch.no_grad():
-            probability_matrix = torch.full(labels.shape, self.mrtd_mask_probability)
-            mrtd_input_ids = self.mask(mrtd_input_ids, self.text_encoder.config.vocab_size, probability_matrix=probability_matrix)
-            # momentum module is used as generator
-            mrtd_logits_m = self.text_encoder_m(mrtd_input_ids,
-                                               attention_mask=text1.attention_mask,
-                                               encoder_hidden_states=image_embeds_m,
-                                               encoder_attention_mask=image_atts,
-                                               return_dict=True,
-                                               return_logits=True,
-                                               )
-            weights = F.softmax(mrtd_logits_m, dim=-1)
-            mrtd_input_ids, mrtd_labels = self.mrtd_mask_modeling(mrtd_input_ids, text1.input_ids, text1.attention_mask, weights)
-        output_mrtd = self.text_encoder.bert(mrtd_input_ids,
-                                            attention_mask=text1.attention_mask,
-                                            encoder_hidden_states=image_embeds,
-                                            encoder_attention_mask=image_atts,
-                                            return_dict=True,
-                                            )
-        mrtd_output = self.mrtd_head(output_mrtd.last_hidden_state.view(-1, self.text_width))
-        loss_mrtd = F.cross_entropy(mrtd_output, mrtd_labels.view(-1))
-
-        return loss_cl, loss_pitm, loss_mlm, loss_prd, loss_mrtd
+        return loss_cl, loss_pitm, 0, 0, 0
 
     @torch.no_grad()
     def copy_params(self):

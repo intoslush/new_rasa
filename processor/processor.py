@@ -37,7 +37,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer,clu
         "txt_acc": AverageMeter(),
         "mlm_acc": AverageMeter()
     }
-    if args.distributed and get_rank() == 0:
+    if not args.distributed or (args.distributed and torch.distributed.get_rank() == 0):
         tb_writer = SummaryWriter(log_dir=args.output_dir)
         global_step =0
     best_top1 = 0.0
@@ -72,7 +72,8 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer,clu
             image_num_cluster = len(set(image_pseudo_labels_np)) - (1 if -1 in image_pseudo_labels_np else 0)
             logger.info("==> Statistics for epoch [{}]: {} image clusters,total{}".format(epoch, image_num_cluster,len(image_pseudo_labels_np)))
             image_pseudo_labels = torch.tensor(image_pseudo_labels_np).long().to(device)
-            torch.distributed.broadcast(image_pseudo_labels, src=0)
+            if args.distributed:
+                torch.distributed.broadcast(image_pseudo_labels, src=0)
             train_loader.dataset.mode = 'train'
             train_loader.dataset.set_pseudo_labels(image_pseudo_labels.cpu())
             if epoch > 0:
@@ -110,7 +111,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer,clu
             for j, los in enumerate((loss_cl, loss_pitm, loss_mlm, loss_prd, loss_mrtd)):
                 loss += config['weights'][j] * los
 
-            if args.distributed and get_rank() == 0:
+            if not args.distributed or (args.distributed and torch.distributed.get_rank() == 0):
                 global_step=global_step + 1
                 tb_writer.add_scalars("LossGroup", {
                 "CL": loss_cl.item(),
@@ -123,14 +124,13 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer,clu
 
             optimizer.zero_grad()
             # torch.autograd.set_detect_anomaly(True)
-            dist.barrier()
             loss.backward()
             # torch.autograd.set_detect_anomaly(False)
             optimizer.step()
             
             if epoch == 0 and n_iter % step_size == 0 and n_iter <= warmup_iterations:
                 scheduler.step(n_iter // step_size)
-            if args.distributed and get_rank() == 0:
+            if not args.distributed or (args.distributed and torch.distributed.get_rank() == 0):
                 current_lr = optimizer.param_groups[0]['lr']
                 tb_writer.add_scalars("Meta", {
                     "LearningRate": current_lr,
@@ -171,10 +171,10 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer,clu
                         best = test_result['r1']
                         best_epoch = epoch
                         best_log = log_stats
+        if args.distributed:
+            dist.barrier()
 
-        dist.barrier()
-
-    if args.distributed and get_rank() == 0:
+    if not args.distributed or (args.distributed and torch.distributed.get_rank() == 0):
         tb_writer.close()
 
         
