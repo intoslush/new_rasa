@@ -29,6 +29,12 @@ class ALBEF(nn.Module):
         self.text_width = self.text_encoder.config.hidden_size
         self.text_proj = nn.Linear(self.text_width, embed_dim)
 
+        ####添加prompting模块
+        self.prompt_length = 1  
+        self.prompt1 = nn.Parameter(torch.randn(self.prompt_length, self.text_width))
+        self.prompt2 = nn.Parameter(torch.randn(self.prompt_length, self.text_width))
+        
+        
         # Heads
         self.itm_head = nn.Linear(self.text_width, 2)
         self.prd_head = nn.Linear(self.text_width, 2)
@@ -61,7 +67,7 @@ class ALBEF(nn.Module):
         image2=batch['image2']
         text1=self.tokenizer(batch['caption1'], padding='longest', max_length=config['max_words'], return_tensors="pt").to(image1.device)
         text2=self.tokenizer(batch['caption2'], padding='longest', max_length=config['max_words'], return_tensors="pt").to(image1.device)
-        
+        text_atts= text2.attention_mask
         idx=batch['person_id']
         replace=batch['replace_flag']
         # pseudo_label=batch['pseudo_label']
@@ -73,6 +79,15 @@ class ALBEF(nn.Module):
         text_output = self.text_encoder.bert(text2.input_ids, attention_mask=text2.attention_mask,
                                              return_dict=True, mode='text')
         text_embeds = text_output.last_hidden_state
+        #### 将prompting模块的特征添加到text_embeds中
+        bsz = text_embeds.size(0)
+        prompt1 = self.prompt1.unsqueeze(0).expand(bsz, -1, -1)  # (bsz, prompt_len, hidden)
+        prompt2 = self.prompt2.unsqueeze(0).expand(bsz, -1, -1)  # (bsz, prompt_len, hidden)
+        text_embeds = torch.cat([prompt1, prompt2, text_embeds], dim=1)  # (bsz, seq_len+2, hidden)
+        ##### 同时更新 attention_mask
+        prompt_atts = torch.ones(bsz, 2 * self.prompt_length, dtype=text2.attention_mask.dtype).to(text2.attention_mask.device)
+        text_atts = torch.cat([prompt_atts, text2.attention_mask], dim=1)
+        
         text_feat = F.normalize(self.text_proj(text_embeds[:, 0, :]), dim=-1)#同样是取cls token的特征
         # Contrastive loss
         idx = idx.view(-1, 1)
@@ -110,7 +125,7 @@ class ALBEF(nn.Module):
         # forward the positve image-text pairs
         #两个模态融合的部分
         output_pos = self.text_encoder.bert(encoder_embeds=text_embeds,
-                                            attention_mask=text2.attention_mask,
+                                            attention_mask=text_atts,
                                             encoder_hidden_states=image_embeds,
                                             encoder_attention_mask=image_atts,
                                             return_dict=True,
@@ -135,10 +150,10 @@ class ALBEF(nn.Module):
         # select a negative text for each image
         text_neg_idx = torch.multinomial(weights_i2t, 1).flatten()
         text_embeds_neg = text_embeds[text_neg_idx]
-        text_atts_neg = text2.attention_mask[text_neg_idx]
+        text_atts_neg = text_atts[text_neg_idx]
         # forward the negative image-text pairs
         text_embeds_all = torch.cat([text_embeds, text_embeds_neg], dim=0)
-        text_atts_all = torch.cat([text2.attention_mask, text_atts_neg], dim=0)
+        text_atts_all = torch.cat([text_atts, text_atts_neg], dim=0)
         image_embeds_all = torch.cat([image_embeds_neg, image_embeds], dim=0)
         image_atts_all = torch.cat([image_atts, image_atts], dim=0)
         output_neg_cross = self.text_encoder.bert(encoder_embeds=text_embeds_all,
