@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=0,2
 NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 DATASET_NAME="CUHK-PEDES"
 
@@ -13,5 +13,5 @@ torchrun \
   --checkpoint ./data/ALBEF/ALBEF.pth \
   --dataset_name $DATASET_NAME \
   --root_dir ./re_id \
-  --num_epoch 25
+  --num_epoch 30
   # --config configs/PS_cuhk_pedes.yaml \

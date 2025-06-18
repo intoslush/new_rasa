@@ -13,9 +13,10 @@ def cluster_begin_epoch(train_loader, model, args,tokenizer = None,logger = None
     model.to(device)
     model = model.eval()
 
-    test=True
+    test=False
+    # test=True
+    save_path="./logs/pseudo_labels.pt"
     if test:
-        save_path="./logs/pseudo_labels.pt"
         if os.path.exists(save_path):
             logger.info(f"检测到已保存的伪标签文件 {save_path}，直接加载...")
             image_pseudo_labels = torch.load(save_path, weights_only=False)

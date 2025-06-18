@@ -38,7 +38,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer,clu
         "mlm_acc": AverageMeter()
     }
     if not args.distributed or (args.distributed and torch.distributed.get_rank() == 0):
-        tb_writer = SummaryWriter(log_dir=args.output_dir)
+        tb_writer = SummaryWriter(log_dir=args.output_dir+ '/tensorboard', flush_secs=10)
         global_step =0
     best_top1 = 0.0
     yaml = YAML.YAML(typ='rt') 
@@ -105,22 +105,15 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer,clu
             if n_iter % log_period == 0:
                 # print("rank {} epoch {} iter {}:".format(get_rank(),epoch, n_iter))
                 logger.info("开始epoch {}的第{}/{}个batch的loss计算".format(epoch, n_iter,len(train_loader)))   
-            loss_cl, loss_pitm, loss_mlm, loss_prd, loss_mrtd = model(batch,alpha,config) 
+            loss_dict = model(batch,alpha,config) 
             # 计算总损失
             loss = 0.
-            for j, los in enumerate((loss_cl, loss_pitm, loss_mlm, loss_prd, loss_mrtd)):
-                loss += config['weights'][j] * los
+            for los_name in loss_dict:
+                loss += config['weights'][los_name] * loss_dict[los_name]
 
             if not args.distributed or (args.distributed and torch.distributed.get_rank() == 0):
                 global_step=global_step + 1
-                tb_writer.add_scalars("LossGroup", {
-                "CL": loss_cl.item(),
-                "PITM": loss_pitm.item(),
-                "MLM": loss_mlm.item(),
-                "PRD": loss_prd.item(),
-                "MRTD": loss_mrtd.item(),
-                "Total": loss.item()
-                }, global_step)
+                tb_writer.add_scalars("LossGroup",  {k: v.item() for k, v in loss_dict.items()}, global_step)
 
             optimizer.zero_grad()
             # torch.autograd.set_detect_anomaly(True)
@@ -165,9 +158,9 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer,clu
                         'best': best,
                         'best_epoch': best_epoch
                     }
-                    torch.save(save_obj, os.path.join(args.output_dir, 'checkpoint_epoch%02d.pth' % epoch))
+                    torch.save(save_obj, os.path.join(args.output_dir,"checkpoint",'checkpoint_epoch%02d.pth' % epoch))
                     if test_result['r1'] > best:
-                        torch.save(save_obj, os.path.join(args.output_dir, 'checkpoint_best.pth'))
+                        torch.save(save_obj, os.path.join(args.output_dir,"checkpoint", 'checkpoint_best.pth'))
                         best = test_result['r1']
                         best_epoch = epoch
                         best_log = log_stats

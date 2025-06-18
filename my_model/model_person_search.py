@@ -157,7 +157,7 @@ class ALBEF(nn.Module):
         loss_pitm = F.cross_entropy(vl_output, itm_labels)
         
 
-        return loss_cl, loss_pitm, 0, 0, 0
+        return {"loss_cl":loss_cl, "loss_pitm":loss_pitm, "loss_mlm":torch.tensor(0), "loss_prd":torch.tensor(0), "loss_mrtd":torch.tensor(0)}
 
     @torch.no_grad()
     def copy_params(self):

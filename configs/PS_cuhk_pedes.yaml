@@ -30,9 +30,5 @@ schedular: {sched: cosine, lr: 1e-5, epochs: 25, min_lr: 1e-6, decay_rate: 1, wa
 
 eval_epoch: 20
 
-weights:
-  - 0.5
-  - 1
-  - 1
-  - 0.5
-  - 0.5
+
+weights: {"loss_cl": 0.5, "loss_pitm": 1, "loss_mlm": 1, "loss_prd": 0.5, "loss_mrtd": 0.5}
