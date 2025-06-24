@@ -67,7 +67,13 @@ class ALBEF(nn.Module):
         image2=batch['image2']
         text1=self.tokenizer(batch['caption1'], padding='longest', max_length=config['max_words'], return_tensors="pt").to(image1.device)
         text2=self.tokenizer(batch['caption2'], padding='longest', max_length=config['max_words'], return_tensors="pt").to(image1.device)
-        text_atts= text2.attention_mask
+
+        # text1 = self.tokenizer(batch['caption1'], padding='longest', max_length=config['max_words'], return_tensors="pt")
+        # text1 = {k: v.to(image1.device) for k, v in text1.items()}
+
+        # text2 = self.tokenizer(batch['caption2'], padding='longest', max_length=config['max_words'], return_tensors="pt")
+        # text2 = {k: v.to(image1.device) for k, v in text2.items()}
+        text_atts= text2['attention_mask']
         idx=batch['person_id']
         replace=batch['replace_flag']
         # pseudo_label=batch['pseudo_label']
@@ -76,7 +82,7 @@ class ALBEF(nn.Module):
         image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(image1.device)#注意力掩码全一表示所有图像token都应该被关注
         image_feat = F.normalize(self.vision_proj(image_embeds[:, 0, :]), dim=-1)#用于取cls token的特征,shape(13,577)
         # extract text features
-        text_output = self.text_encoder.bert(text2.input_ids, attention_mask=text2.attention_mask,
+        text_output = self.text_encoder.bert(text2['input_ids'], attention_mask=text2['attention_mask'],
                                              return_dict=True, mode='text')
         text_embeds = text_output.last_hidden_state
         #### 将prompting模块的特征添加到text_embeds中
@@ -85,8 +91,8 @@ class ALBEF(nn.Module):
         prompt2 = self.prompt2.unsqueeze(0).expand(bsz, -1, -1)  # (bsz, prompt_len, hidden)
         text_embeds = torch.cat([prompt1, prompt2, text_embeds], dim=1)  # (bsz, seq_len+2, hidden)
         ##### 同时更新 attention_mask
-        prompt_atts = torch.ones(bsz, 2 * self.prompt_length, dtype=text2.attention_mask.dtype).to(text2.attention_mask.device)
-        text_atts = torch.cat([prompt_atts, text2.attention_mask], dim=1)
+        prompt_atts = torch.ones(bsz, 2 * self.prompt_length, dtype=text2['attention_mask'].dtype).to(text2['attention_mask'].device)
+        text_atts = torch.cat([prompt_atts, text2['attention_mask']], dim=1)
         
         text_feat = F.normalize(self.text_proj(text_embeds[:, 0, :]), dim=-1)#同样是取cls token的特征
         # Contrastive loss
@@ -100,7 +106,7 @@ class ALBEF(nn.Module):
             image_feat_m = F.normalize(self.vision_proj_m(image_embeds_m[:, 0, :]), dim=-1)
             image_feat_all = torch.cat([image_feat_m.t(), self.image_queue.clone().detach()], dim=1)
 
-            text_output_m = self.text_encoder_m.bert(text2.input_ids, attention_mask=text2.attention_mask,
+            text_output_m = self.text_encoder_m.bert(text2['input_ids'], attention_mask=text2['attention_mask'],
                                                      return_dict=True, mode='text')
             text_feat_m = F.normalize(self.text_proj_m(text_output_m.last_hidden_state[:, 0, :]), dim=-1)
             text_feat_all = torch.cat([text_feat_m.t(), self.text_queue.clone().detach()], dim=1)
@@ -181,12 +187,14 @@ class ALBEF(nn.Module):
                 param_m.data.copy_(param.data)  # initialize
                 param_m.requires_grad = False  # not update by gradient
 
+    @torch._dynamo.disable
     @torch.no_grad()
     def _momentum_update(self):
         for model_pair in self.model_pairs:
             for param, param_m in zip(model_pair[0].parameters(), model_pair[1].parameters()):
                 param_m.data = param_m.data * self.momentum + param.data * (1. - self.momentum)
-
+    
+    @torch._dynamo.disable
     @torch.no_grad()
     def _dequeue_and_enqueue(self, image_feat, text_feat, idx):
         # gather keys before updating queue

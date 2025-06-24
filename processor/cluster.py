@@ -73,7 +73,7 @@ def cluster_begin_epoch(train_loader, model, args,tokenizer = None,logger = None
 
         try:
             
-            image_rerank_dist = compute_jaccard_distance(image_bank, k1=30, k2=6, search_option=0 )  
+            image_rerank_dist = compute_jaccard_distance(image_bank, k1=30, k2=6, search_option=2 )  
         except Exception as e:
             logger.info(f" 计算距离出错：{e}")     
         # image_rerank_dist = compute_jaccard_distance(image_bank, k1=30, k2=6, search_option=0)  

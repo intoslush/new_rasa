@@ -4,6 +4,7 @@ import torch
 import numpy as np
 import random
 import time
+from datetime import timedelta
 from dataset import get_dataloder
 from processor.processor import do_train
 # from utils.checkpoint import Checkpointer
@@ -26,7 +27,7 @@ if __name__ == '__main__':
 
     if args.distributed:
         torch.cuda.set_device(args.local_rank)
-        torch.distributed.init_process_group(backend="nccl", init_method="env://")
+        torch.distributed.init_process_group(backend="nccl", init_method="env://",timeout=timedelta(seconds=1800))
         synchronize()
     
     device = "cuda"
@@ -52,6 +53,7 @@ if __name__ == '__main__':
     else:
         logger.info("模型初始化化成功")
         model.to(device)
+    # model = torch.compile(model)#优化运行速度pytorch2.x专享 ##疯狂报错捏放弃了
     #获取dataloader
     train_loader, val_loader, test_loader, cluster_lodaer = get_dataloder(args)
     logger.info("dataloader加载成功")
