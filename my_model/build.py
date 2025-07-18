@@ -12,7 +12,7 @@ import logging
 
 
  
-def bulid_tokenizer(tokenizer_path="./bert-base-uncased",logger=None): 
+def build_tokenizer(tokenizer_path="./bert-base-uncased",logger=None): 
     # 设置本地模型路径 
     local_model_path = "./bert-base-uncased" 
     # 检查是否已存在模型文件 
@@ -37,7 +37,7 @@ def bulid_tokenizer(tokenizer_path="./bert-base-uncased",logger=None):
  
 def build_model(args): 
     logger = logging.getLogger(args.name)
-    tokenizer = bulid_tokenizer(args.tokenizer_path,logger) 
+    tokenizer = build_tokenizer(args.tokenizer_path,logger) 
     yaml = YAML.YAML(typ='rt') 
     config = yaml.load(open(args.config, 'r')) 
     model = ALBEF(config=config, text_encoder=args.tokenizer_path, tokenizer=tokenizer) 

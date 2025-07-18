@@ -3,15 +3,17 @@ from .faiss_rerank import compute_jaccard_distance
 from sklearn.cluster import DBSCAN
 import torch
 import os
+from my_model import build_tokenizer
 
-def cluster_begin_epoch(train_loader, model, args,tokenizer = None,logger = None):
+def cluster_begin_epoch(train_loader, model, args,config,tokenizer = None,logger = None):
     device = "cuda"
-    feature_size =256 #cuhk是577,融合之后是768
+    feature_size =256 #cuhk是256,融合之后是768
     max_size = len(train_loader.dataset)  #这个是所有的图片和描述对的数量共计6800对左右     
     image_bank = torch.zeros((max_size, feature_size)).to(device)
     index = 0
     model.to(device)
     model = model.eval()
+    tokenizer = build_tokenizer(args.tokenizer_path,logger)
 
     test=False
     # test=True
@@ -39,18 +41,17 @@ def cluster_begin_epoch(train_loader, model, args,tokenizer = None,logger = None
             image1 = image1.to(device, non_blocking=True)
             # image2 = image2.to(device, non_blocking=True)
             # idx = idx.to(device, non_blocking=True)
-            replace = replace.to(device, non_blocking=True)
+            # replace = replace.to(device, non_blocking=True)
             # text_input1 = tokenizer(text1, padding='longest', max_length=config['max_words'], return_tensors="pt").to(device)
             # text_input2 = tokenizer(text2, padding='longest', max_length=config['max_words'], return_tensors="pt").to(device)
             
             image_embeds = model.visual_encoder(image1)#(13,577,768)
             # image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(image1.device)#注意力掩码全一表示所有图像token都应该被关注
             image_feat = F.normalize(model.vision_proj(image_embeds[:, 0, :]), dim=-1)#用于取cls token的特征,shape(13,577)
-            # extract text features
+            # # extract text features
             # text_output = model.text_encoder.bert(text_input2.input_ids, attention_mask=text_input2.attention_mask,
-                                                # return_dict=True, mode='text')
+            #                                     return_dict=True, mode='text')
             # text_embeds = text_output.last_hidden_state
-            # text_feat = F.normalize(model.text_proj(text_embeds[:, 0, :]), dim=-1)#同样是取cls token的特征
             batch_size = image1.shape[0]
             
             # output_pos =model.text_encoder.bert(encoder_embeds=text_embeds,
@@ -60,8 +61,11 @@ def cluster_begin_epoch(train_loader, model, args,tokenizer = None,logger = None
             #                                 return_dict=True,
             #                                 mode='fusion',
             #                                 )
+            
             # fusion_feat=output_pos.last_hidden_state[:, 0, :]#shape(13,768)
             image_bank[index: index + batch_size] = image_feat
+            # print("fusion_feat shape: ", fusion_feat.shape)
+            # assert False
             index = index + batch_size
             
 

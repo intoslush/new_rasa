@@ -29,12 +29,6 @@ class ALBEF(nn.Module):
         self.text_width = self.text_encoder.config.hidden_size
         self.text_proj = nn.Linear(self.text_width, embed_dim)
 
-        ####添加prompting模块
-        self.prompt_length = 1  
-        self.prompt1 = nn.Parameter(torch.randn(self.prompt_length, self.text_width))
-        self.prompt2 = nn.Parameter(torch.randn(self.prompt_length, self.text_width))
-        
-        
         # Heads
         self.itm_head = nn.Linear(self.text_width, 2)
         self.prd_head = nn.Linear(self.text_width, 2)
@@ -67,12 +61,6 @@ class ALBEF(nn.Module):
         image2=batch['image2']
         text1=self.tokenizer(batch['caption1'], padding='longest', max_length=config['max_words'], return_tensors="pt").to(image1.device)
         text2=self.tokenizer(batch['caption2'], padding='longest', max_length=config['max_words'], return_tensors="pt").to(image1.device)
-
-        # text1 = self.tokenizer(batch['caption1'], padding='longest', max_length=config['max_words'], return_tensors="pt")
-        # text1 = {k: v.to(image1.device) for k, v in text1.items()}
-
-        # text2 = self.tokenizer(batch['caption2'], padding='longest', max_length=config['max_words'], return_tensors="pt")
-        # text2 = {k: v.to(image1.device) for k, v in text2.items()}
         text_atts= text2['attention_mask']
         idx=batch['person_id']
         replace=batch['replace_flag']
@@ -85,14 +73,7 @@ class ALBEF(nn.Module):
         text_output = self.text_encoder.bert(text2['input_ids'], attention_mask=text2['attention_mask'],
                                              return_dict=True, mode='text')
         text_embeds = text_output.last_hidden_state
-        #### 将prompting模块的特征添加到text_embeds中
-        bsz = text_embeds.size(0)
-        prompt1 = self.prompt1.unsqueeze(0).expand(bsz, -1, -1)  # (bsz, prompt_len, hidden)
-        prompt2 = self.prompt2.unsqueeze(0).expand(bsz, -1, -1)  # (bsz, prompt_len, hidden)
-        text_embeds = torch.cat([prompt1, prompt2, text_embeds], dim=1)  # (bsz, seq_len+2, hidden)
-        ##### 同时更新 attention_mask
-        prompt_atts = torch.ones(bsz, 2 * self.prompt_length, dtype=text2['attention_mask'].dtype).to(text2['attention_mask'].device)
-        text_atts = torch.cat([prompt_atts, text2['attention_mask']], dim=1)
+        
         
         text_feat = F.normalize(self.text_proj(text_embeds[:, 0, :]), dim=-1)#同样是取cls token的特征
         # Contrastive loss
@@ -129,6 +110,35 @@ class ALBEF(nn.Module):
         # Relation-aware Learning: Probabilistic Image-Text Matching + Positive Relation Detection
         # Probabilistic Image-Text Matching
         # forward the positve image-text pairs
+                # === Masked Language Modeling ===
+
+        input_ids = text1.input_ids.clone()
+        labels = input_ids.clone()
+
+        # 创建 MLM mask 概率矩阵
+        probability_matrix = torch.full(labels.shape, self.mlm_probability)
+
+        # 生成带掩码的输入和标签
+        input_ids, labels = self.mask(
+            input_ids,
+            self.text_encoder.config.vocab_size,
+            targets=labels,
+            probability_matrix=probability_matrix
+        )
+
+        # 前向传播：不使用 soft label，只使用 hard label
+        mlm_output = self.text_encoder(
+            input_ids,
+            attention_mask=text1.attention_mask,
+            encoder_hidden_states=image_embeds,            # 图文融合
+            encoder_attention_mask=image_atts,
+            return_dict=True,
+            labels=labels                                   # 监督目标
+        )
+
+        # 获取标准的交叉熵 loss
+        loss_mlm = mlm_output.loss
+
         #两个模态融合的部分
         output_pos = self.text_encoder.bert(encoder_embeds=text_embeds,
                                             attention_mask=text_atts,
@@ -178,7 +188,7 @@ class ALBEF(nn.Module):
         loss_pitm = F.cross_entropy(vl_output, itm_labels)
         
 
-        return {"loss_cl":loss_cl, "loss_pitm":loss_pitm, "loss_mlm":torch.tensor(0), "loss_prd":torch.tensor(0), "loss_mrtd":torch.tensor(0)}
+        return {"loss_cl":loss_cl, "loss_pitm":loss_pitm, "loss_mlm":loss_mlm, "loss_prd":torch.tensor(0), "loss_mrtd":torch.tensor(0)}
 
     @torch.no_grad()
     def copy_params(self):

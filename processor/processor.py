@@ -58,31 +58,35 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer,clu
     best_log = ''
     step_size = 100
     warmup_iterations = warmup_steps * step_size
-    # 开始eval
+    
     if args.distributed:
         model_without_ddp = model.module
     else:
         model_without_ddp = model
-
+    #make output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, "checkpoint"), exist_ok=True)
     # train
     for epoch in range(start_epoch, num_epoch + 1):
         # 只在 rank 0 上计算伪标签
+        cluster_loader.dataset.mode = 'cluster'
         if not args.distributed or dist.get_rank() == 0:
             with torch.no_grad():
-                cluster_loader.dataset.mode = 'cluster'
-                image_pseudo_labels_np = cluster_begin_epoch(cluster_loader, model, args, None, logger)
+                
+                image_pseudo_labels_np = cluster_begin_epoch(cluster_loader, model, args,config, None, logger)
                 image_num_cluster = len(set(image_pseudo_labels_np)) - (1 if -1 in image_pseudo_labels_np else 0)
                 logger.info("==> Statistics for epoch [{}]: {} image clusters, total {}".format(
                     epoch, image_num_cluster, len(image_pseudo_labels_np)))
                 image_pseudo_labels = torch.tensor(image_pseudo_labels_np).long().to(device)
         else:
             # 其它进程准备空 tensor 接收广播
-            cluster_loader.dataset.mode = 'cluster'
             image_pseudo_labels = torch.empty(len(cluster_loader.dataset), dtype=torch.long, device=device)
 
         # 同步伪标签给所有进程
         if args.distributed:
+            dist.barrier()
             dist.broadcast(image_pseudo_labels, src=0)
+
 
         train_loader.dataset.mode = 'train'
         train_loader.dataset.set_pseudo_labels(image_pseudo_labels.cpu())
@@ -170,7 +174,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer,clu
                         'best': best,
                         'best_epoch': best_epoch
                     }
-                    torch.save(save_obj, os.path.join(args.output_dir,"checkpoint",'checkpoint_epoch%02d.pth' % epoch))
+                    # torch.save(save_obj, os.path.join(args.output_dir,"checkpoint",'checkpoint_epoch%02d.pth' % epoch))
                     if test_result['r1'] > best:
                         torch.save(save_obj, os.path.join(args.output_dir,"checkpoint", 'checkpoint_best.pth'))
                         best = test_result['r1']
