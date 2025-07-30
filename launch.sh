@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=1,2
+export CUDA_VISIBLE_DEVICES=1,3
 
 NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 DATASET_NAME="CUHK-PEDES"

@@ -159,6 +159,9 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer,clu
                                  }
                     with open(os.path.join(args.output_dir, "log.txt"), "a") as f:
                         f.write(json.dumps(log_stats) + "\n")
+                        if not args.distributed or (args.distributed and torch.distributed.get_rank() == 0):
+                            for key, value in test_result.items():
+                                tb_writer.add_scalar(f"Eval/{key}", value, epoch)
                 else:
                     log_stats = {'epoch': epoch,
                                  **{f'test_{k}': v for k, v in test_result.items()},
@@ -180,9 +183,11 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer,clu
                         best = test_result['r1']
                         best_epoch = epoch
                         best_log = log_stats
+    #save and close
         if args.distributed:
             dist.barrier()
-
+    with open(os.path.join(args.output_dir, "log.txt"), "a") as f:
+                        f.write(json.dumps(best_log) + "\n")
     if not args.distributed or (args.distributed and torch.distributed.get_rank() == 0):
         tb_writer.close()
 
