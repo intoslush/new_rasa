@@ -25,15 +25,18 @@ if __name__ == '__main__':
     num_gpus = int(os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1
     args.distributed = num_gpus > 1
 
-    if args.distributed:
-        torch.cuda.set_device(args.local_rank)
-        torch.distributed.init_process_group(backend="nccl", init_method="env://",timeout=timedelta(seconds=1800))
-        synchronize()
+    
     
     device = "cuda"
     cur_time = time.strftime("%m%d_%H%M", time.localtime())
     args.output_dir = op.join(args.output_dir, args.dataset_name, f'{cur_time}_{name}')
     logger = setup_logger(args.name, save_dir=args.output_dir, if_train=args.training, distributed_rank=get_rank())
+    if args.distributed:
+        torch.cuda.set_device(args.local_rank)
+        torch.distributed.init_process_group(backend="nccl", init_method="env://",timeout=timedelta(seconds=1800))
+        synchronize()
+        logger.info("成功启用分布式")
+        
     logger.info("Using {} GPUs".format(num_gpus))
     logger.info(str(args).replace(',', '\n'))
     save_train_configs(args.output_dir, args)

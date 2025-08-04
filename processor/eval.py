@@ -119,10 +119,11 @@ def evaluation(model, data_loader, tokenizer, device, config,args):
         
         score = model.itm_head(output.last_hidden_state[:, 0, :])[:, 1]
         score_matrix_t2i[i, topk_idx] = score
-    if args.distributed:
-        dist.barrier()
-        torch.distributed.all_reduce(score_matrix_t2i, op=torch.distributed.ReduceOp.SUM)
+    # if args.distributed:
+    #     dist.barrier()
+    #     torch.distributed.all_reduce(score_matrix_t2i, op=torch.distributed.ReduceOp.SUM)
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print('Evaluation time {}'.format(total_time_str))
+    # print('Evaluation time {}'.format(total_time_str))
+    logger.info('Evaluation time {}'.format(total_time_str))
     return score_matrix_t2i.cpu()

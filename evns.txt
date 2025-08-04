@@ -1,5 +1,4 @@
 easydict 
-pyyaml
 regex 
 prettytable
 ftfy 

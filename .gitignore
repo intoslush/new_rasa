@@ -150,3 +150,6 @@ re_id/
 .vscode/*
 bert-base-uncased
 logs/
+test.*
+*.memmap
+data
