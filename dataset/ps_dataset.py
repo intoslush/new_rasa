@@ -53,7 +53,7 @@ class ps_train_dataset(Dataset):
 
     def augment(self, caption, person):
         caption_aug = caption
-        if np.random.random() < self.weak_pos_pair_probability:
+        if np.random.random() < 0:#self.weak_pos_pair_probability
             caption_aug = np.random.choice(self.person2text[person], 1).item()
         if caption_aug == caption:
             replace = 0

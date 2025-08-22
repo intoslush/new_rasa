@@ -537,10 +537,11 @@ class BertEncoder(nn.Module):
         output_hidden_states=False,
         return_dict=True,
         mode='multi_modal',
+        output_cross_attentions=True,
     ):
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
-        all_cross_attentions = () if output_attentions and self.config.add_cross_attention else None
+        all_cross_attentions = () if (output_attentions and self.config.add_cross_attention) or output_cross_attentions else None
 
         next_decoder_cache = () if use_cache else None
         
@@ -604,6 +605,12 @@ class BertEncoder(nn.Module):
                 next_decoder_cache += (layer_outputs[-1],)
             if output_attentions:
                 all_self_attentions = all_self_attentions + (layer_outputs[1],)
+            if (output_attentions and self.config.add_cross_attention) or output_cross_attentions:
+                # 对于支持 cross-attn 的 BertLayer，通常输出为：
+                # (hidden_states, self_attn, cross_attn, present_key_value)
+                # 但某些层可能没有 cross-attn（fusion 之前的层），要做健壮性检查
+                if len(layer_outputs) > 2 and layer_outputs[2] is not None:
+                    all_cross_attentions = all_cross_attentions + (layer_outputs[2],)
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)

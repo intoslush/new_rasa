@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch import nn
 from my_model.vit import VisionTransformer
 from my_model.xbert import BertConfig, BertForMaskedLM
-
+import os
 class ALBEF(nn.Module):
     def __init__(self, text_encoder=None, tokenizer=None, config=None):
         super().__init__()
@@ -54,7 +54,7 @@ class ALBEF(nn.Module):
         # Queues
         self._init_queues(embed_dim)
 
-    def forward(self, batch,alpha,config):#其中text2是概率同一个id的其他图片的描述,img1和img2是同一个图片的两个不同的增广
+    def forward(self, batch,alpha,config,epoch):#其中text2是概率同一个id的其他图片的描述,img1和img2是同一个图片的两个不同的增广
         # extract image features
         # image1, image2, text1, text2, alpha, idx, replace
         image1=batch['image1']
@@ -107,25 +107,54 @@ class ALBEF(nn.Module):
 
         self._dequeue_and_enqueue(image_feat_m, text_feat_m, idx)
 
-        # Relation-aware Learning: Probabilistic Image-Text Matching + Positive Relation Detection
-        # Probabilistic Image-Text Matching
         # forward the positve image-text pairs
-                # === Masked Language Modeling ===
-
+        # === Masked Language Modeling ===
         input_ids = text1.input_ids.clone()
         labels = input_ids.clone()
-
-        # 创建 MLM mask 概率矩阵
-        probability_matrix = torch.full(labels.shape, self.mlm_probability)
-
-        # 生成带掩码的输入和标签
+        if epoch>32:
+            # === 1) 计算跨模态显著性（用 image1 与 text1 对齐）===
+            with torch.no_grad():
+                saliency = self.compute_cross_modal_saliency(
+                    text_ids=text1['input_ids'],
+                    attention_mask=text1['attention_mask'],
+                    image_embeds=image_embeds,    # 来自 image1 的编码
+                    image_atts=image_atts,
+                    layers=config.get('saliency_layers', 3),
+                )
+            # === 2) 基于显著性的（无阶段）强相关优先掩码概率 ===
+            probability_matrix = self.build_curriculum_mask_probs(
+                saliency=saliency,
+                attention_mask=text1['attention_mask'],
+                input_ids=text1['input_ids'],
+                base_prob=float(config.get('mlm_probability', self.mlm_probability)),
+                focus_top_p=float(config.get('mlm_focus_top_p', 0.3)),
+                p_strong=float(config.get('mlm_p_strong', 0.95)),
+                p_min=float(config.get('mlm_prob_min', 0.0)),
+                p_max=float(config.get('mlm_prob_max', 0.95)),
+            )
+        else:
+            probability_matrix=None
+        ids_before_debug=input_ids.clone()
         input_ids, labels = self.mask(
             input_ids,
             self.text_encoder.config.vocab_size,
             targets=labels,
             probability_matrix=probability_matrix
         )
-
+        if epoch > 35:
+            # config['debug_mask_file'] = "./mask_debug/all_epochs.txt"
+            # 然后 forward 里调用时这样写：
+            self.debug_render_mask_diff(
+                epoch=epoch,
+                input_ids_before=ids_before_debug,
+                input_ids_after=input_ids,
+                targets=labels,
+                attention_mask=text1['attention_mask'],
+                raw_texts=batch.get('caption1', None),
+                limit_per_epoch=int(config.get('debug_mask_limit_per_epoch', 50)),
+                out_path=config.get('debug_mask_file', None),  # <== 单文件路径
+            )
+        
         # 前向传播：不使用 soft label，只使用 hard label
         mlm_output = self.text_encoder(
             input_ids,
@@ -133,7 +162,7 @@ class ALBEF(nn.Module):
             encoder_hidden_states=image_embeds,            # 图文融合
             encoder_attention_mask=image_atts,
             return_dict=True,
-            labels=labels                                   # 监督目标
+            labels=labels,                                   # 监督目标
         )
 
         # 获取标准的交叉熵 loss
@@ -235,36 +264,47 @@ class ALBEF(nn.Module):
         self.queue_ptr[0] = ptr
 
     def mask(self, input_ids, vocab_size, targets=None, masked_indices=None, probability_matrix=None):
-        if masked_indices is None:#用来确定掩码位置
-            masked_indices = torch.bernoulli(probability_matrix).bool()#bernoulli函数生成0-1随机数
+        device = input_ids.device
+
+        # 保证概率矩阵与 input_ids 在同一设备
+        if probability_matrix is None:
+            prob = torch.full(input_ids.shape, self.mlm_probability, device=device, dtype=torch.float32)
+        else:
+            prob = probability_matrix.to(device=device, dtype=torch.float32)
+
+        if masked_indices is None:
+            masked_indices = torch.bernoulli(prob).to(dtype=torch.bool, device=device)
+
+        # 不 mask PAD/CLS
         masked_indices[input_ids == self.tokenizer.pad_token_id] = False
-        masked_indices[input_ids == self.tokenizer.cls_token_id] = False#padding和cls不应该被掩码
+        masked_indices[input_ids == self.tokenizer.cls_token_id] = False
+        masked_indices[input_ids == self.tokenizer.sep_token_id] = False
+
         if targets is not None:
-            targets[~masked_indices] = -100  # We only compute loss on masked tokens
-        # 80% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
-        indices_replaced = torch.bernoulli(torch.full(input_ids.shape, 0.8)).bool() & masked_indices
+            targets = targets.to(device)
+            targets[~masked_indices] = -100  # 只对被 mask 的位置算 loss
+
+        # 80%：换成 [MASK]
+        indices_replaced = torch.bernoulli(
+            torch.full(input_ids.shape, 0.8, device=device, dtype=torch.float32)
+        ).to(torch.bool) & masked_indices
         input_ids[indices_replaced] = self.tokenizer.mask_token_id
-        # 10% of the time, we replace masked input tokens with random word
-        indices_random = torch.bernoulli(torch.full(input_ids.shape, 0.5)).bool() & masked_indices & ~indices_replaced
-        random_words = torch.randint(vocab_size, input_ids.shape, dtype=torch.long).to(input_ids.device)
+
+        # 10%：换成随机词
+        indices_random = (
+            torch.bernoulli(torch.full(input_ids.shape, 0.5, device=device, dtype=torch.float32))
+            .to(torch.bool) & masked_indices & ~indices_replaced
+        )
+        random_words = torch.randint(vocab_size, input_ids.shape, dtype=torch.long, device=device)
         input_ids[indices_random] = random_words[indices_random]
-        # The rest of the time (10% of the time) we keep the masked input tokens unchanged
+
+        # 剩下 10%：保留原词
         if targets is not None:
             return input_ids, targets
         else:
             return input_ids
 
-    def mrtd_mask_modeling(self, mrtd_input_ids, ori_input_ids, attention_mask, weights):#weights(13, 36, 30522)
-        bs = mrtd_input_ids.size(0)
-        weights = weights.view(-1, weights.size(-1))#(468, 30522)
-        pred = torch.multinomial(weights, 1).view(bs, -1)#每行采样一个词,(13, 36)
-        pred[:, 0] = self.tokenizer.cls_token_id
-        # pad_token_id is 0
-        mrtd_input_ids = pred * attention_mask#(13, 36)
-        mrtd_labels = (pred != ori_input_ids) * attention_mask
-        mrtd_labels[mrtd_input_ids == self.tokenizer.pad_token_id] = -100
-        mrtd_labels[mrtd_input_ids == self.tokenizer.cls_token_id] = -100
-        return mrtd_input_ids, mrtd_labels
+
     
     def _build_vit(self, img_size):
         return VisionTransformer(
@@ -278,6 +318,298 @@ class ALBEF(nn.Module):
         self.register_buffer("idx_queue", torch.full((1, self.queue_size), -100))
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
 
+    @torch.no_grad()
+    def compute_cross_modal_saliency(
+        self,
+        text_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        image_embeds: torch.Tensor,
+        image_atts: torch.Tensor,
+        layers: int = 3,
+    ) -> torch.Tensor:
+        """
+        返回 shape [B, L] 的文本 token 显著性，按样本缩放到 [0,1]。
+        """
+        out = self.text_encoder.bert(
+            input_ids=text_ids,
+            attention_mask=attention_mask,
+            encoder_hidden_states=image_embeds,
+            encoder_attention_mask=image_atts,
+            output_attentions=True,
+            return_dict=True,
+            mode='multi_modal',
+        )
+        # cross_attentions: list[Tensor[B, H, L, S]]，取最后 layers 层
+        attn_list = out.cross_attentions[-layers:]
+        attn = torch.stack(attn_list, dim=0).mean(0)  # [B, H, L, S]
+        sal = attn.mean(1).sum(-1)                    # [B, L] 先均头，再对图像源求和
+
+        # 只保留有效 token，并按样本缩放到 [0,1]
+        sal = sal * attention_mask  # PAD 位置为 0
+        sal_min = sal.masked_fill(attention_mask == 0, 1e9).amin(dim=1, keepdim=True)
+        sal_min = torch.where(torch.isinf(sal_min), torch.zeros_like(sal_min), sal_min)
+        sal_max = sal.amax(dim=1, keepdim=True)
+        denom = (sal_max - sal_min).clamp(min=1e-6)
+        sal_norm = ((sal - sal_min) / denom) * attention_mask  # 无效位置依旧为 0
+        return sal_norm
+    @torch.no_grad()
+    def build_curriculum_mask_probs(
+        self,
+        saliency: torch.Tensor,               # [B, L], 已在 [0,1]
+        attention_mask: torch.Tensor,         # [B, L]
+        epoch: int = None,                    # 保留参数以兼容旧调用，但本函数不使用
+        total_epochs: int = None,             # 同上
+        base_prob: float = 0.15,              # 目标整体掩码率
+        gamma: float = 1.5,                   # >1 强化高显著性
+        p_max: float = 0.95,                  # 上限避免极端
+        saliency_threshold: float = 0.0,      # 低于该阈值的 token 不参与采样
+    ) -> torch.Tensor:
+        """
+        返回 [B, L] 概率矩阵。仅依据显著性分配，无“易/难”阶段逻辑。
+        注意：不在此函数内强制去掉 [CLS]/[SEP]/[PAD]；这些在外部或 mask() 里处理。
+        """
+        device = saliency.device
+        attn = attention_mask.to(saliency.dtype)  # {0,1}
+
+        # 1) 强调高显著性；可选阈值过滤
+        s = saliency.clamp(0.0, 1.0) * attn
+        if saliency_threshold > 0.0:
+            keep_high = (s >= saliency_threshold).to(s.dtype)
+            s = s * keep_high
+
+        w = (s.clamp(0, 1) ** gamma) * attn  # [B, L]
+
+        # 若某样本全被过滤（和为0），退化成均匀分布在有效位上
+        sum_w = w.sum(dim=1, keepdim=True)
+        fallback = (sum_w <= 1e-12).to(w.dtype)
+        w = torch.where(fallback.bool(), attn, w)
+        sum_w = w.sum(dim=1, keepdim=True).clamp_min(1e-6)
+
+        # 2) 把期望掩码数 (base_prob * #valid) 按 w 比例分配到各 token
+        L_valid = attn.sum(dim=1, keepdim=True).clamp_min(1.0)
+        exp_tokens = base_prob * L_valid
+        prob = exp_tokens * (w / sum_w)
+
+        # 3) 截断与掩码
+        prob = prob.clamp(0.0, p_max) * attn
+
+        return prob
+    
+    @torch.no_grad()
+    def build_curriculum_mask_probs(
+        self,
+        saliency: torch.Tensor,          # [B, L]，compute_cross_modal_saliency 的输出（已[0,1] & masked by attn）
+        attention_mask: torch.Tensor,    # [B, L]，1=有效
+        input_ids: torch.Tensor,         # [B, L]，用于避开特殊符号
+        base_prob: float = None,         # 期望整体 MLM 掩码比例，默认用 self.mlm_probability
+        focus_top_p: float = 0.3,        # 仅在每条样本的显著性 top p 范围内作为“强相关候选”
+        p_strong: float = 0.95,          # 强相关候选上的掩码概率（上限）
+        p_min: float = 0.0,              # 概率下限
+        p_max: float = 0.95,             # 概率上限（避免 1.0）
+    ) -> torch.Tensor:
+        """
+        返回 [B, L] 的概率矩阵，偏向显著性高的 token；无阶段，仅用于最后若干 epoch。
+        会自动求解非候选位置的 p_weak，使期望掩码比例接近 base_prob。
+        """
+        device = saliency.device
+        B, L = saliency.shape
+        if base_prob is None:
+            base_prob = float(self.mlm_probability)
+
+        # 可被 mask 的位置：有效 & 非特殊符号
+        maskable = attention_mask.bool().clone()
+        for sp_id in [getattr(self.tokenizer, "pad_token_id", None),
+                    getattr(self.tokenizer, "cls_token_id", None),
+                    getattr(self.tokenizer, "sep_token_id", None)]:
+            if sp_id is not None:
+                maskable &= (input_ids != sp_id)
+
+        probs = torch.zeros((B, L), device=device, dtype=torch.float32)
+
+        # 逐样本构造概率
+        for b in range(B):
+            valid_pos = maskable[b]                            # 允许参与 MLM 的位置
+            n_valid = int(valid_pos.sum().item())
+            if n_valid == 0:
+                continue
+
+            # 目标期望掩码数
+            target_E = base_prob * n_valid
+
+            # 在 valid 里按显著性降序排序，取 top_p 作为“强相关候选”
+            sal_b = saliency[b].clone()
+            sal_b[~valid_pos] = -1e9
+            k_candidate = max(1, int(round(n_valid * focus_top_p)))
+            k_candidate = min(k_candidate, n_valid)
+            topk_vals, topk_idx = torch.topk(sal_b, k_candidate, dim=-1, largest=True, sorted=False)
+            strong_mask = torch.zeros(L, dtype=torch.bool, device=device)
+            strong_mask[topk_idx] = True
+            strong_mask &= valid_pos
+
+            n_strong = int(strong_mask.sum().item())
+            if n_strong == 0:
+                # 如果显著性全是 0（或都被过滤），退化为均匀概率
+                p = max(p_min, min(p_max, base_prob))
+                probs[b, valid_pos] = p
+                continue
+
+            # 先假设强相关候选统一给 p_strong
+            # 再解非候选的 p_weak 以匹配整体期望 target_E：
+            #   target_E = p_strong * n_strong + p_weak * (n_valid - n_strong)
+            remain = max(0, n_valid - n_strong)
+            if remain == 0:
+                # 所有可 mask 的位置都在强相关集合里
+                p_strong_adj = min(p_strong, target_E / max(1, n_strong))
+                p_strong_adj = float(max(p_min, min(p_max, p_strong_adj)))
+                probs[b, strong_mask] = p_strong_adj
+                continue
+
+            # 有非候选位置，先尝试用固定 p_strong
+            p_weak = (target_E - p_strong * n_strong) / remain
+            if p_weak < p_min - 1e-9:
+                # 强相关已经过量，降低 p_strong 以满足期望
+                p_strong_adj = target_E / n_strong
+                p_strong_adj = float(max(p_min, min(p_max, p_strong_adj)))
+                probs[b, strong_mask] = p_strong_adj
+                # 非候选直接设为 p_min（通常为 0）
+                probs[b, valid_pos & (~strong_mask)] = float(p_min)
+            else:
+                # 正常情形：强相关用 p_strong，非候选用 p_weak（再做夹取）
+                p_strong_adj = float(max(p_min, min(p_max, p_strong)))
+                p_weak_adj = float(max(p_min, min(p_max, p_weak)))
+                probs[b, strong_mask] = p_strong_adj
+                probs[b, valid_pos & (~strong_mask)] = p_weak_adj
+
+        # 最终再次把不可 mask 的位置置零
+        probs[~maskable] = 0.0
+        return probs
+    
+
+    @torch.no_grad()
+    def debug_render_mask_diff(
+        self,
+        epoch: int,
+        input_ids_before: torch.Tensor,   # [B, L]，mask() 前
+        input_ids_after: torch.Tensor,    # [B, L]，mask() 后
+        targets: torch.Tensor,            # [B, L]，-100 表示未 mask
+        attention_mask: torch.Tensor,     # [B, L]
+        raw_texts=None,                   # 可传 batch['caption1']
+        limit_per_epoch: int = 50,
+        out_path: str = None,             # 改为单文件路径
+    ) -> None:
+        """
+        将原句、掩码后句子、被 mask 的词及替换情况**追加**写入同一个文件。
+        分布式时仅 rank 0 写；每个 epoch 最多写 limit_per_epoch 条。
+        """
+        # 仅主进程写
+        if torch.distributed.is_initialized():
+            try:
+                if torch.distributed.get_rank() != 0:
+                    return
+            except Exception:
+                pass
+
+        # 选择输出文件：优先参数 -> 成员属性 -> config -> 默认路径
+        if out_path is None:
+            out_path = getattr(self, "debug_mask_file", None)
+            if out_path is None:
+                out_path = getattr(self, "config_debug_mask_file", None) or "./mask_debug/mask_debug_all.txt"
+
+        # 确保目录存在
+        out_dir = os.path.dirname(out_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+
+        # 统计：每个 epoch 的已写条数
+        if not hasattr(self, "_dbg_written_per_epoch"):
+            self._dbg_written_per_epoch = {}  # {epoch: count}
+
+        written = int(self._dbg_written_per_epoch.get(int(epoch), 0))
+        if written >= limit_per_epoch:
+            return
+
+        B, L = input_ids_before.shape
+        to_write_blocks = []
+
+        # 若本 epoch 首次写入，则加一个 epoch 分隔头
+        if written == 0:
+            sep = "=" * 100
+            to_write_blocks.append(f"\n{sep}\n[Epoch {int(epoch)}]  Mask Debug\n{sep}\n")
+
+        for b in range(B):
+            if written + len(to_write_blocks) - (1 if written == 0 else 0) >= limit_per_epoch:
+                break
+
+            valid = attention_mask[b].bool()
+            masked_pos = (targets[b] != -100) & valid
+            if masked_pos.sum().item() == 0:
+                continue
+
+            ids_before = input_ids_before[b].tolist()
+            ids_after  = input_ids_after[b].tolist()
+
+            # 句子级
+            try:
+                orig_sent  = self.tokenizer.decode([t for i,t in enumerate(ids_before) if valid[i]], skip_special_tokens=True)
+                after_sent = self.tokenizer.decode([t for i,t in enumerate(ids_after)  if valid[i]], skip_special_tokens=True)
+            except Exception:
+                orig_sent  = self.tokenizer.decode(ids_before, skip_special_tokens=False)
+                after_sent = self.tokenizer.decode(ids_after,  skip_special_tokens=False)
+
+            # token 级差异
+            pos_idx = torch.nonzero(masked_pos, as_tuple=False).squeeze(-1).tolist()
+            if isinstance(pos_idx, int):
+                pos_idx = [pos_idx]
+
+            diff_lines = []
+            for j in pos_idx:
+                t0 = ids_before[j]
+                t1 = ids_after[j]
+                tok0 = self.tokenizer.convert_ids_to_tokens(int(t0))
+                tok1 = self.tokenizer.convert_ids_to_tokens(int(t1))
+                diff_lines.append(f"(pos={j}) {tok0}  ->  {tok1}")
+
+            raw = None
+            if raw_texts is not None:
+                try:
+                    raw = str(raw_texts[b])
+                except Exception:
+                    raw = None
+
+            block = []
+            block.append("-" * 80)
+            block.append(f"Sample #{b}")
+            if raw:
+                block.append(f"RAW : {raw}")
+            block.append(f"ORIG: {orig_sent}")
+            block.append(f"MASK: {after_sent}")
+            block.append("MASKED TOKENS:")
+            for dl in diff_lines:
+                block.append("  - " + dl)
+            block.append("")  # 空行
+            to_write_blocks.append("\n".join(block))
+
+        if to_write_blocks:
+            with open(out_path, "a", encoding="utf-8") as f:
+                f.write("\n".join(to_write_blocks) + "\n")
+            # 更新本 epoch 已写条数
+            # 注意：如果本次包含了 epoch 头部，那不计入条数
+            added = len(to_write_blocks)
+            if written == 0:
+                added -= 1
+            self._dbg_written_per_epoch[int(epoch)] = written + max(0, added)
+
+        # 方便在 __init__ 里用 config 传路径（可选）
+        if not hasattr(self, "config_debug_mask_file"):
+            # 若从 config 里有该键，记一份，后续就能默认使用
+            try:
+                if hasattr(self, "tokenizer") and hasattr(self, "__dict__"):
+                    pass  # 保留占位，避免静态检查告警
+            except Exception:
+                pass
+
+
+    
 @torch.no_grad()
 def concat_all_gather(tensor):
     """
