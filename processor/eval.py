@@ -24,7 +24,7 @@ def itm_eval(scores_t2i, img2person, txt2person, eval_mAP):
     ir5 = acc_k(matches, k=5).item()
     ir10 = acc_k(matches, k=10).item()
     ir_mean = (ir1 + ir5 + ir10) / 3
-
+    eval_mAP=True
     if eval_mAP:
         real_num = matches.sum(dim=-1)
         tmp_cmc = matches.cumsum(dim=-1).float()

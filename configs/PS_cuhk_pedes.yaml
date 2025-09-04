@@ -9,7 +9,7 @@ bert_config: 'configs/config_bert.json'
 
 max_words: 50
 image_res: 384
-batch_size_train: 16
+batch_size_train: 13
 batch_size_test: 64
 
 mlm_probability: 0.15
@@ -31,10 +31,10 @@ schedular: {sched: cosine, lr: 1e-5, epochs: 35, min_lr: 2e-6, decay_rate: 1, wa
 eval_epoch: 20
 
 
-weights: {"loss_cl": 0.5, "loss_pitm": 1, "loss_mlm": 1, "loss_prd": 0.5, "loss_mrtd": 0.5}
+weights: {"loss_cl": 0.5, "loss_pitm": 1, "loss_mlm": 1, "loss_prd": 0.5, "loss_mrtd": 0.5,"loss_sim": 0.5}
 # 新增的权重调度配置
 weights_schedule:
-  freeze_epochs: 20     # 前 20 个 epoch 不变
+  freeze_epochs: 40     # 前 20 个 epoch 不变
   mode: "cosine"        # 可改为 "cosine" 获得更平滑的变化linear
   normalize_sum: false  # 若希望总权重和保持不变可改为 true
   loss_cl:
@@ -42,4 +42,5 @@ weights_schedule:
   loss_mlm:
     max: 1.5 
   loss_pitm:
-    min: 0.2           
+    min: 0.2 
+    max: 1.5          
