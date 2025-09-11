@@ -234,9 +234,10 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
                 dist.barrier()
             # apply pseudo labels
             train_loader.dataset.mode = 'train'
-            train_loader.dataset.set_pseudo_labels(image_pseudo_labels.cpu())
-            if epoch>40:
+            if True:
                 train_loader.dataset.set_augment_policy('pseudo')
+            train_loader.dataset.set_pseudo_labels(image_pseudo_labels.cpu())
+            
         
         # scheduler step per epoch (after warmup epoch 0)
         if epoch > 0:

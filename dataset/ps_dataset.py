@@ -21,7 +21,7 @@ class ps_train_dataset(Dataset):
         # 新增：伪标签增广的触发概率（默认与 weak_pos_pair_probability 一致更好理解）
         pseudo_pos_pair_probability=None,
         # 新增：增广策略 original | pseudo | none
-        augment_policy: str = "original",
+        augment_policy: str = "none",
     ):
         anns = []
         for f in ann_file:
@@ -87,7 +87,10 @@ class ps_train_dataset(Dataset):
         self.cluster2indices.clear()
         for idx, c in enumerate(labels):
             if c != -1:
-                self.cluster2indices[c].append(idx)
+                self.cluster2indices[c.item()].append(idx)
+
+
+
 
     def set_probs(self, weak_pos_pair_probability=None, pseudo_pos_pair_probability=None):
         """可选：动态调整两种增广触发概率"""
@@ -123,12 +126,11 @@ class ps_train_dataset(Dataset):
 
         if self.pseudo_pos_pair_probability <= 0:
             return caption_aug, replace
-
         if np.random.random() >= self.pseudo_pos_pair_probability:
             return caption_aug, replace
 
         # 取当前样本的伪标签
-        c = self.pseudo_labels[real_idx] if self.pseudo_labels is not None else -1
+        c = self.pseudo_labels[real_idx].item() if self.pseudo_labels is not None else -1
         if c == -1:
             return caption_aug, replace  # 无簇/噪声簇，跳过
 
