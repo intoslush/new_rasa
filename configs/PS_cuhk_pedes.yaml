@@ -31,7 +31,7 @@ schedular: {sched: cosine, lr: 1e-5, epochs: 35, min_lr: 2e-6, decay_rate: 1, wa
 eval_epoch: 20
 
 
-weights: {"loss_cl": 0.5, "loss_pitm": 1, "loss_mlm": 1, "loss_prd": 0.5, "loss_mrtd": 0.5,"loss_sim": 0.5}
+weights: {"loss_cl": 0.5, "loss_itm": 1, "loss_mlm": 1, "loss_prd": 0.5, "loss_mrtd": 0.5,"loss_sim": 0.5}
 # 新增的权重调度配置
 weights_schedule:
   freeze_epochs: 40     # 前 20 个 epoch 不变
@@ -41,6 +41,6 @@ weights_schedule:
     min: 0.1            # 20 之后从 0.5 线性降到 0.1（到最后一个 epoch 达到）
   loss_mlm:
     max: 1.5 
-  loss_pitm:
+  loss_itm:
     min: 0.2 
     max: 1.5          

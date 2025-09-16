@@ -57,6 +57,7 @@ class ALBEF(nn.Module):
     def forward(self, batch,alpha,config,epoch):#其中text2是概率同一个id的其他图片的描述,img1和img2是同一个图片的两个不同的增广
         # extract image features
         # image1, image2, text1, text2, alpha, idx, replace
+        loss_dict={}
         image1=batch['image1']
         image2=batch['image2']
         text1=self.tokenizer(batch['caption1'], padding='longest', max_length=config['max_words'], return_tensors="pt").to(image1.device)
@@ -73,196 +74,225 @@ class ALBEF(nn.Module):
         text_output = self.text_encoder.bert(text2['input_ids'], attention_mask=text2['attention_mask'],
                                              return_dict=True, mode='text')
         text_embeds = text_output.last_hidden_state
-        
-        
         text_feat = F.normalize(self.text_proj(text_embeds[:, 0, :]), dim=-1)#同样是取cls token的特征
-        # Contrastive loss
-        idx = idx.view(-1, 1)
-        idx_all = torch.cat([idx.t(), self.idx_queue.clone().detach()], dim=1)#(13,65549)
-        pos_idx = torch.eq(idx, idx_all).float()#(13,65549)
-        sim_targets = pos_idx / pos_idx.sum(1, keepdim=True)#归一化,做出样本标签队列,(13,65549)
-        with torch.no_grad():
-            self._momentum_update()
-            image_embeds_m = self.visual_encoder_m(image2)
-            image_feat_m = F.normalize(self.vision_proj_m(image_embeds_m[:, 0, :]), dim=-1)
-            image_feat_all = torch.cat([image_feat_m.t(), self.image_queue.clone().detach()], dim=1)
+        
+        # forward the image-text contrastive loss
+        enable_cl_loss = bool(config.get('enable_cl_loss', True))
+        if enable_cl_loss:
+            # Contrastive loss
+            idx = idx.view(-1, 1)
+            idx_all = torch.cat([idx.t(), self.idx_queue.clone().detach()], dim=1)#(13,65549)
+            pos_idx = torch.eq(idx, idx_all).float()#(13,65549)
+            sim_targets = pos_idx / pos_idx.sum(1, keepdim=True)#归一化,做出样本标签队列,(13,65549)
+            with torch.no_grad():
+                self._momentum_update()
+                image_embeds_m = self.visual_encoder_m(image2)
+                image_feat_m = F.normalize(self.vision_proj_m(image_embeds_m[:, 0, :]), dim=-1)
+                image_feat_all = torch.cat([image_feat_m.t(), self.image_queue.clone().detach()], dim=1)
 
-            text_output_m = self.text_encoder_m.bert(text2['input_ids'], attention_mask=text2['attention_mask'],
-                                                     return_dict=True, mode='text')
-            text_feat_m = F.normalize(self.text_proj_m(text_output_m.last_hidden_state[:, 0, :]), dim=-1)
-            text_feat_all = torch.cat([text_feat_m.t(), self.text_queue.clone().detach()], dim=1)
-            sim_i2t_m = image_feat_m @ text_feat_all / self.temp#计算当前批次与队列的相似得分
-            sim_t2i_m = text_feat_m @ image_feat_all / self.temp
-            sim_i2t_targets = alpha * F.softmax(sim_i2t_m, dim=1) + (1 - alpha) * sim_targets#用来让标签匹配变软
-            sim_t2i_targets = alpha * F.softmax(sim_t2i_m, dim=1) + (1 - alpha) * sim_targets
+                text_output_m = self.text_encoder_m.bert(text2['input_ids'], attention_mask=text2['attention_mask'],
+                                                        return_dict=True, mode='text')
+                text_feat_m = F.normalize(self.text_proj_m(text_output_m.last_hidden_state[:, 0, :]), dim=-1)
+                text_feat_all = torch.cat([text_feat_m.t(), self.text_queue.clone().detach()], dim=1)
+                sim_i2t_m = image_feat_m @ text_feat_all / self.temp#计算当前批次与队列的相似得分
+                sim_t2i_m = text_feat_m @ image_feat_all / self.temp
+                sim_i2t_targets = alpha * F.softmax(sim_i2t_m, dim=1) + (1 - alpha) * sim_targets#用来让标签匹配变软
+                sim_t2i_targets = alpha * F.softmax(sim_t2i_m, dim=1) + (1 - alpha) * sim_targets
 
-        sim_i2t = image_feat @ text_feat_all / self.temp
-        sim_t2i = text_feat @ image_feat_all / self.temp
+            sim_i2t = image_feat @ text_feat_all / self.temp
+            sim_t2i = text_feat @ image_feat_all / self.temp
 
 
-        loss_i2t = -torch.sum(F.log_softmax(sim_i2t, dim=1) * sim_i2t_targets, dim=1).mean()
-        loss_t2i = -torch.sum(F.log_softmax(sim_t2i, dim=1) * sim_t2i_targets, dim=1).mean()
+            loss_i2t = -torch.sum(F.log_softmax(sim_i2t, dim=1) * sim_i2t_targets, dim=1).mean()
+            loss_t2i = -torch.sum(F.log_softmax(sim_t2i, dim=1) * sim_t2i_targets, dim=1).mean()
 
-        loss_cl = (loss_i2t + loss_t2i ) / 2
+            loss_dict['loss_cl'] = (loss_i2t + loss_t2i ) / 2
 
-        self._dequeue_and_enqueue(image_feat_m, text_feat_m, idx)
+            self._dequeue_and_enqueue(image_feat_m, text_feat_m, idx)
 
         # forward the positve image-text pairs
-        # === Masked Language Modeling ===
-        
-        if epoch>4:
-            # === 1) 计算跨模态显著性（用 image1 与 text1 对齐）===
-            with torch.no_grad():
-                saliency = self.compute_cross_modal_saliency(
-                    text_ids=text1['input_ids'],
+        enable_mlm_loss = bool(config.get('enable_mlm_loss', True))
+        if enable_mlm_loss:
+            # === Masked Language Modeling ===
+            saliency_compute_epoch = config.get('saliency_compute_epoch', 5)
+            if epoch>saliency_compute_epoch:
+                # === 1) 计算跨模态显著性（用 image1 与 text1 对齐）===
+                with torch.no_grad():
+                    saliency = self.compute_cross_modal_saliency(
+                        text_ids=text1['input_ids'],
+                        attention_mask=text1['attention_mask'],
+                        image_embeds=image_embeds,    # 来自 image1 的编码
+                        image_atts=image_atts,
+                        layers=config.get('saliency_layers', 3),
+                    )
+                # === 2) 基于显著性的（无阶段）强相关优先掩码概率 ===
+                probability_matrix = self.build_curriculum_mask_probs(
+                    saliency=saliency,
                     attention_mask=text1['attention_mask'],
-                    image_embeds=image_embeds,    # 来自 image1 的编码
-                    image_atts=image_atts,
-                    layers=config.get('saliency_layers', 3),
+                    input_ids=text1['input_ids'],
+                    base_prob=float(config.get('mlm_probability', self.mlm_probability)),
+                    focus_top_p=float(config.get('mlm_focus_top_p', 0.3)),
+                    p_strong=float(config.get('mlm_p_strong', 0.95)),
+                    p_min=float(config.get('mlm_prob_min', 0.0)),
+                    p_max=float(config.get('mlm_prob_max', 0.95)),
                 )
-            # === 2) 基于显著性的（无阶段）强相关优先掩码概率 ===
-            probability_matrix = self.build_curriculum_mask_probs(
-                saliency=saliency,
-                attention_mask=text1['attention_mask'],
-                input_ids=text1['input_ids'],
-                base_prob=float(config.get('mlm_probability', self.mlm_probability)),
-                focus_top_p=float(config.get('mlm_focus_top_p', 0.3)),
-                p_strong=float(config.get('mlm_p_strong', 0.95)),
-                p_min=float(config.get('mlm_prob_min', 0.0)),
-                p_max=float(config.get('mlm_prob_max', 0.95)),
-            )
-        else:
-            probability_matrix=None
-        input_ids = text1.input_ids.clone()
-        labels = input_ids.clone()
-        ids_before_debug=input_ids.clone()
-        input_ids, labels = self.mask(
-            input_ids,
-            self.text_encoder.config.vocab_size,
-            targets=labels,
-            probability_matrix=None#probability_matrix
-        )
-        if epoch > 35:
-            # config['debug_mask_file'] = "./mask_debug/all_epochs.txt"
-            self.debug_render_mask_diff(
-                epoch=epoch,
-                input_ids_before=ids_before_debug,
-                input_ids_after=input_ids,
+            else:
+                probability_matrix=None
+            input_ids = text1.input_ids.clone()
+            labels = input_ids.clone()
+            ids_before_debug=input_ids.clone()
+            input_ids, labels = self.mask(
+                input_ids,
+                self.text_encoder.config.vocab_size,
                 targets=labels,
-                attention_mask=text1['attention_mask'],
-                raw_texts=batch.get('caption1', None),
-                limit_per_epoch=int(config.get('debug_mask_limit_per_epoch', 50)),
-                out_path=config.get('debug_mask_file', None),  # <== 单文件路径
+                probability_matrix=None #probability_matrix  填入可以根据显著性调整mlm的mask概率
             )
-        
-        # 前向传播：不使用 soft label，只使用 hard label
-        mlm_output = self.text_encoder(
-            input_ids,
-            attention_mask=text1.attention_mask,
-            encoder_hidden_states=image_embeds,            # 图文融合
-            encoder_attention_mask=image_atts,
-            return_dict=True,
-            labels=labels,                                   # 监督目标
-        )
-
-        # 获取标准的交叉熵 loss
-        loss_mlm = mlm_output.loss
-
-        #两个模态融合的部分
-        output_pos = self.text_encoder.bert(encoder_embeds=text_embeds,
-                                            attention_mask=text_atts,
-                                            encoder_hidden_states=image_embeds,
-                                            encoder_attention_mask=image_atts,
-                                            return_dict=True,
-                                            mode='fusion',
-                                            )
-        with torch.no_grad():
-            bs = image1.size(0)
-            weights_i2t = F.softmax(sim_i2t[:, :bs], dim=1)
-            weights_t2i = F.softmax(sim_t2i[:, :bs], dim=1)
+            debug_mask_epoch = config.get('debug_mask_epoch', 99)
+            if epoch > debug_mask_epoch:
+                # config['debug_mask_file'] = "./mask_debug/all_epochs.txt"
+                self.debug_render_mask_diff(
+                    epoch=epoch,
+                    input_ids_before=ids_before_debug,
+                    input_ids_after=input_ids,
+                    targets=labels,
+                    attention_mask=text1['attention_mask'],
+                    raw_texts=batch.get('caption1', None),
+                    limit_per_epoch=int(config.get('debug_mask_limit_per_epoch', 50)),
+                    out_path=config.get('debug_mask_file', None),  # <== 单文件路径
+                )
+            enable_soft_label = bool(config.get('mlm_soft_label', False))
+            if enable_soft_label:
+                with torch.no_grad():
+                    logits_m = self.text_encoder_m(input_ids, 
+                                                attention_mask = text1.attention_mask,
+                                                encoder_hidden_states = image_embeds_m,
+                                                encoder_attention_mask = image_atts,      
+                                                return_dict = True,
+                                                return_logits = True,   
+                                                ) 
+                # 前向传播：不使用 soft label，只使用 hard label
+                mlm_output = self.text_encoder(
+                    input_ids,
+                    attention_mask=text1.attention_mask,
+                    encoder_hidden_states=image_embeds,            # 图文融合
+                    encoder_attention_mask=image_atts,
+                    return_dict=True,
+                    labels=labels,
+                    soft_labels = F.softmax(logits_m,dim=-1),
+                    alpha=alpha
+                )
+            else:
+                mlm_output = self.text_encoder(
+                    input_ids,
+                    attention_mask=text1.attention_mask,
+                    encoder_hidden_states=image_embeds,            # 图文融合
+                    encoder_attention_mask=image_atts,
+                    return_dict=True,
+                    labels=labels,
+                )
+            # 获取标准的交叉熵 loss
+            loss_dict['loss_mlm'] = mlm_output.loss
             
-            mask = torch.eq(idx, idx.T)
-            if idx.shape[0] <= 2:
-                raise ValueError("Batch size too small, idx.shape[0] = {}".format(idx.shape[0]))
-            weights_i2t.masked_fill_(mask, 0)#通过掩码保证不会选正样本作为难样本
-            weights_t2i.masked_fill_(mask, 0)
-            # weights_t2i = weights_t2i + 1e-8
-            # weights_i2t = weights_i2t + 1e-8
-        # select a negative image for each text
+        # forward the matched and unmatched image-text pairs
+        enable_itm_loss = bool(config.get('enable_itm_loss', True))
+        if enable_itm_loss: 
+            #两个模态融合的部分
+            output_pos = self.text_encoder.bert(encoder_embeds=text_embeds,
+                                                attention_mask=text_atts,
+                                                encoder_hidden_states=image_embeds,
+                                                encoder_attention_mask=image_atts,
+                                                return_dict=True,
+                                                mode='fusion',
+                                                )
+            with torch.no_grad():
+                bs = image1.size(0)
+                weights_i2t = F.softmax(sim_i2t[:, :bs], dim=1)
+                weights_t2i = F.softmax(sim_t2i[:, :bs], dim=1)
+                
+                mask = torch.eq(idx, idx.T)
+                if idx.shape[0] <= 2:
+                    raise ValueError("Batch size too small, idx.shape[0] = {}".format(idx.shape[0]))
+                weights_i2t.masked_fill_(mask, 0)#通过掩码保证不会选正样本作为难样本
+                weights_t2i.masked_fill_(mask, 0)
+                # weights_t2i = weights_t2i + 1e-8
+                # weights_i2t = weights_i2t + 1e-8
+            # select a negative image for each text
+            
+            image_neg_idx = torch.multinomial(weights_t2i, 1).flatten()
+            image_embeds_neg = image_embeds[image_neg_idx]#难的负样本
+            # select a negative text for each image
+            text_neg_idx = torch.multinomial(weights_i2t, 1).flatten()
+            text_embeds_neg = text_embeds[text_neg_idx]
+            text_atts_neg = text_atts[text_neg_idx]
+            # forward the negative image-text pairs
+            text_embeds_all = torch.cat([text_embeds, text_embeds_neg], dim=0)
+            text_atts_all = torch.cat([text_atts, text_atts_neg], dim=0)
+            image_embeds_all = torch.cat([image_embeds_neg, image_embeds], dim=0)
+            image_atts_all = torch.cat([image_atts, image_atts], dim=0)
+            output_neg_cross = self.text_encoder.bert(encoder_embeds=text_embeds_all,
+                                                    attention_mask=text_atts_all,
+                                                    encoder_hidden_states=image_embeds_all,
+                                                    encoder_attention_mask=image_atts_all,
+                                                    return_dict=True,
+                                                    mode='fusion',
+                                                    )
+            vl_embeddings = torch.cat([output_pos.last_hidden_state[:, 0, :], output_neg_cross.last_hidden_state[:, 0, :]],
+                                    dim=0)
+            vl_output = self.itm_head(vl_embeddings)
+            itm_labels = torch.cat([torch.ones(bs, dtype=torch.long), torch.zeros(2 * bs, dtype=torch.long)],
+                                dim=0).to(image1.device)
+            #与融合后的标签直接做交叉熵
+            loss_dict['loss_itm'] = F.cross_entropy(vl_output, itm_labels)
         
-        image_neg_idx = torch.multinomial(weights_t2i, 1).flatten()
-        image_embeds_neg = image_embeds[image_neg_idx]#难的负样本
-        # select a negative text for each image
-        text_neg_idx = torch.multinomial(weights_i2t, 1).flatten()
-        text_embeds_neg = text_embeds[text_neg_idx]
-        text_atts_neg = text_atts[text_neg_idx]
-        # forward the negative image-text pairs
-        text_embeds_all = torch.cat([text_embeds, text_embeds_neg], dim=0)
-        text_atts_all = torch.cat([text_atts, text_atts_neg], dim=0)
-        image_embeds_all = torch.cat([image_embeds_neg, image_embeds], dim=0)
-        image_atts_all = torch.cat([image_atts, image_atts], dim=0)
-        output_neg_cross = self.text_encoder.bert(encoder_embeds=text_embeds_all,
-                                                  attention_mask=text_atts_all,
-                                                  encoder_hidden_states=image_embeds_all,
-                                                  encoder_attention_mask=image_atts_all,
-                                                  return_dict=True,
-                                                  mode='fusion',
-                                                  )
-        vl_embeddings = torch.cat([output_pos.last_hidden_state[:, 0, :], output_neg_cross.last_hidden_state[:, 0, :]],
-                                  dim=0)
-        vl_output = self.itm_head(vl_embeddings)
-        itm_labels = torch.cat([torch.ones(bs, dtype=torch.long), torch.zeros(2 * bs, dtype=torch.long)],
-                               dim=0).to(image1.device)
-        #与融合后的标签直接做交叉熵
-        loss_pitm = F.cross_entropy(vl_output, itm_labels)
-        ############新增的loss#############################
+        #新增的loss loss_sim
+        enable_sim_loss = bool(config.get('enable_sim_loss', False))
+        if enable_sim_loss:
+            input_sim = text1.input_ids.clone()
+            labels_sim = input_sim.clone()
+            input_sim, labels_sim = self.mask(
+                input_sim,
+                self.text_encoder.config.vocab_size,
+                targets=labels_sim,
+                probability_matrix=probability_matrix
+            )
+            # ===== 新增：融合特征对齐（image2 + masked text1） vs (ITM 正样本融合) =====
+            # 1) 取 mask 后的 text1 表示（上面你已经得到 input_ids/labels，这里直接复用 input_ids）
+            masked_text_out = self.text_encoder.bert(
+                input_ids=input_sim,                               # 已被 mask 的 text1
+                attention_mask=text1['attention_mask'],
+                return_dict=True,
+                mode='text',
+            )
+            masked_text_embeds = masked_text_out.last_hidden_state  # [B, L, H_text]
 
-        input_sim = text1.input_ids.clone()
-        labels_sim = input_sim.clone()
-        input_sim, labels_sim = self.mask(
-            input_sim,
-            self.text_encoder.config.vocab_size,
-            targets=labels_sim,
-            probability_matrix=probability_matrix
-        )
-        # ===== 新增：融合特征对齐（image2 + masked text1） vs (ITM 正样本融合) =====
-        # 1) 取 mask 后的 text1 表示（上面你已经得到 input_ids/labels，这里直接复用 input_ids）
-        masked_text_out = self.text_encoder.bert(
-            input_ids=input_sim,                               # 已被 mask 的 text1
-            attention_mask=text1['attention_mask'],
-            return_dict=True,
-            mode='text',
-        )
-        masked_text_embeds = masked_text_out.last_hidden_state  # [B, L, H_text]
+            # 2) 编码 image2（主干，不用 momentum，方便反传）
+            image2_embeds = self.visual_encoder(image2)             # [B, S_img, H_vision]
+            image2_atts = torch.ones(image2_embeds.size()[:-1], dtype=torch.long, device=image2.device)
 
-        # 2) 编码 image2（主干，不用 momentum，方便反传）
-        image2_embeds = self.visual_encoder(image2)             # [B, S_img, H_vision]
-        image2_atts = torch.ones(image2_embeds.size()[:-1], dtype=torch.long, device=image2.device)
+            # 3) 融合：(image2 + masked text1)
+            fused_masked = self.text_encoder.bert(
+                encoder_embeds=masked_text_embeds,
+                attention_mask=text1['attention_mask'],
+                encoder_hidden_states=image2_embeds,
+                encoder_attention_mask=image2_atts,
+                return_dict=True,
+                mode='fusion',
+            )
 
-        # 3) 融合：(image2 + masked text1)
-        fused_masked = self.text_encoder.bert(
-            encoder_embeds=masked_text_embeds,
-            attention_mask=text1['attention_mask'],
-            encoder_hidden_states=image2_embeds,
-            encoder_attention_mask=image2_atts,
-            return_dict=True,
-            mode='fusion',
-        )
+            # 4) 取两侧的 [CLS] 融合特征
+            cls_itm_pos = output_pos.last_hidden_state[:, 0, :]     # ITM 正样本融合 (image1 + text2)
+            cls_masked  = fused_masked.last_hidden_state[:, 0, :]   # (image2 + masked text1)
 
-        # 4) 取两侧的 [CLS] 融合特征
-        cls_itm_pos = output_pos.last_hidden_state[:, 0, :]     # ITM 正样本融合 (image1 + text2)
-        cls_masked  = fused_masked.last_hidden_state[:, 0, :]   # (image2 + masked text1)
+            # 5) 余弦相似对齐损失（1 - cos），默认不反传到 ITM 分支，避免相互挤压
+            if bool(config.get('sim_anchor_stop_grad', True)):
+                cls_itm_pos = cls_itm_pos.detach()
 
-        # 5) 余弦相似对齐损失（1 - cos），默认不反传到 ITM 分支，避免相互挤压
-        if bool(config.get('sim_anchor_stop_grad', True)):
-            cls_itm_pos = cls_itm_pos.detach()
-
-        z_a = F.normalize(cls_itm_pos, dim=-1)
-        z_b = F.normalize(cls_masked,  dim=-1)
-        loss_sim = (1.0 - (z_a * z_b).sum(dim=-1)).mean()
+            z_a = F.normalize(cls_itm_pos, dim=-1)
+            z_b = F.normalize(cls_masked,  dim=-1)
+            loss_dict['loss_sim'] = (1.0 - (z_a * z_b).sum(dim=-1)).mean()
 
 
-        return {"loss_cl":loss_cl, "loss_pitm":loss_pitm, "loss_mlm":loss_mlm, "loss_prd":torch.tensor(0), "loss_mrtd":torch.tensor(0),"loss_sim": loss_sim,}
+        return loss_dict
 
     @torch.no_grad()
     def copy_params(self):
@@ -397,48 +427,7 @@ class ALBEF(nn.Module):
         denom = (sal_max - sal_min).clamp(min=1e-6)
         sal_norm = ((sal - sal_min) / denom) * attention_mask  # 无效位置依旧为 0
         return sal_norm
-    # @torch.no_grad()
-    # def build_curriculum_mask_probs(
-    #     self,
-    #     saliency: torch.Tensor,               # [B, L], 已在 [0,1]
-    #     attention_mask: torch.Tensor,         # [B, L]
-    #     epoch: int = None,                    # 保留参数以兼容旧调用，但本函数不使用
-    #     total_epochs: int = None,             # 同上
-    #     base_prob: float = 0.15,              # 目标整体掩码率
-    #     gamma: float = 1.5,                   # >1 强化高显著性
-    #     p_max: float = 0.95,                  # 上限避免极端
-    #     saliency_threshold: float = 0.0,      # 低于该阈值的 token 不参与采样
-    # ) -> torch.Tensor:
-    #     """
-    #     返回 [B, L] 概率矩阵。仅依据显著性分配，无“易/难”阶段逻辑。
-    #     注意：不在此函数内强制去掉 [CLS]/[SEP]/[PAD]；这些在外部或 mask() 里处理。
-    #     """
-    #     device = saliency.device
-    #     attn = attention_mask.to(saliency.dtype)  # {0,1}
 
-    #     # 1) 强调高显著性；可选阈值过滤
-    #     s = saliency.clamp(0.0, 1.0) * attn
-    #     if saliency_threshold > 0.0:
-    #         keep_high = (s >= saliency_threshold).to(s.dtype)
-    #         s = s * keep_high
-
-    #     w = (s.clamp(0, 1) ** gamma) * attn  # [B, L]
-
-    #     # 若某样本全被过滤（和为0），退化成均匀分布在有效位上
-    #     sum_w = w.sum(dim=1, keepdim=True)
-    #     fallback = (sum_w <= 1e-12).to(w.dtype)
-    #     w = torch.where(fallback.bool(), attn, w)
-    #     sum_w = w.sum(dim=1, keepdim=True).clamp_min(1e-6)
-
-    #     # 2) 把期望掩码数 (base_prob * #valid) 按 w 比例分配到各 token
-    #     L_valid = attn.sum(dim=1, keepdim=True).clamp_min(1.0)
-    #     exp_tokens = base_prob * L_valid
-    #     prob = exp_tokens * (w / sum_w)
-
-    #     # 3) 截断与掩码
-    #     prob = prob.clamp(0.0, p_max) * attn
-
-    #     return prob
     
     @torch.no_grad()
     def build_curriculum_mask_probs(

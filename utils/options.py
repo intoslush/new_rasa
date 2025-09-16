@@ -90,9 +90,11 @@ def get_args():
     # parser.add_argument("--test_batch_size", type=int, default=512)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--test", dest='training', default=True, action='store_false')
-
+    #我自己添加的参数
+    parser.add_argument("--swap_epoch", type=int, default=99, help="from which epoch to use pseudo augmentation")
+    
     args = parser.parse_args()
-
+    
     return args
 
 def set_seed(seed=0):

@@ -40,6 +40,7 @@ def compute_dynamic_weights(epoch: int,
         schedule = {}
 
     freeze = int(schedule.get("freeze_epochs", 20))
+    freeze=99
     mode = schedule.get("mode", "linear")          # "linear" 或 "cosine"
 
     # 冻结阶段：直接返回初始权重
@@ -234,7 +235,8 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
                 dist.barrier()
             # apply pseudo labels
             train_loader.dataset.mode = 'train'
-            if True:
+            swap_epoch = getattr(args, "swap_epoch", 99)#不启用伪标签随机交换
+            if epoch > swap_epoch:
                 train_loader.dataset.set_augment_policy('pseudo')
             train_loader.dataset.set_pseudo_labels(image_pseudo_labels.cpu())
             
