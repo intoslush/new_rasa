@@ -239,7 +239,17 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
             if epoch > swap_epoch:
                 train_loader.dataset.set_augment_policy('pseudo')
             train_loader.dataset.set_pseudo_labels(image_pseudo_labels.cpu())
-            
+            if bool(config.get('reset_queue_each_epoch', True)):
+                if is_distributed:
+                    dist.barrier()
+                model.reset_queues(random_init=bool(config.get('queue_random_reinit', False)))
+                if is_main:
+                    logger.info(
+                        f"[Rank {rank}] 已清空对比队列 "
+                        f"(random_init={bool(config.get('queue_random_reinit', False))})"
+                    )
+                if is_distributed:
+                    dist.barrier()
         
         # scheduler step per epoch (after warmup epoch 0)
         if epoch > 0:

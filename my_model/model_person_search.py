@@ -112,9 +112,10 @@ class ALBEF(nn.Module):
 
         # forward the positve image-text pairs
         enable_mlm_loss = bool(config.get('enable_mlm_loss', True))
+        enable_soft_label = bool(config.get('mlm_soft_label', True))
         if enable_mlm_loss:
             # === Masked Language Modeling ===
-            saliency_compute_epoch = config.get('saliency_compute_epoch', 5)
+            saliency_compute_epoch = config.get('saliency_compute_epoch', 99)
             if epoch>saliency_compute_epoch:
                 # === 1) 计算跨模态显著性（用 image1 与 text1 对齐）===
                 with torch.no_grad():
@@ -160,7 +161,7 @@ class ALBEF(nn.Module):
                     limit_per_epoch=int(config.get('debug_mask_limit_per_epoch', 50)),
                     out_path=config.get('debug_mask_file', None),  # <== 单文件路径
                 )
-            enable_soft_label = bool(config.get('mlm_soft_label', False))
+            
             if enable_soft_label:
                 with torch.no_grad():
                     logits_m = self.text_encoder_m(input_ids, 
@@ -641,6 +642,38 @@ class ALBEF(nn.Module):
                     pass  # 保留占位，避免静态检查告警
             except Exception:
                 pass
+    @torch.no_grad()
+    def reset_queues(self, random_init: bool = True):
+        """
+        每个 epoch 重新初始化对比队列：
+        - random_init=True：保持和 _init_queues 一致的“随机单位化向量”初始化（推荐）
+        - random_init=False：全部置零（仅保留当前 batch/momentum 的信息）
+        并把 idx_queue 设为 -100、指针清零；DDP 时从 rank0 广播，确保各卡一致
+        """
+        is_ddp = torch.distributed.is_initialized()
+        rank = torch.distributed.get_rank() if is_ddp else 0
+
+        if random_init:
+            if rank == 0:
+                img = F.normalize(torch.randn_like(self.image_queue), dim=0)
+                txt = F.normalize(torch.randn_like(self.text_queue), dim=0)
+                self.image_queue.copy_(img)
+                self.text_queue.copy_(txt)
+                self.idx_queue.fill_(-100)
+                self.queue_ptr.zero_()
+        else:
+            # 全零时，不要再做 normalize，直接置零就好
+            self.image_queue.zero_()
+            self.text_queue.zero_()
+            self.idx_queue.fill_(-100)
+            self.queue_ptr.zero_()
+
+        # DDP 同步（即使非 rank0 也会被覆盖为 rank0 的初始化）
+        if is_ddp:
+            torch.distributed.broadcast(self.image_queue, src=0)
+            torch.distributed.broadcast(self.text_queue, src=0)
+            torch.distributed.broadcast(self.idx_queue, src=0)
+            torch.distributed.broadcast(self.queue_ptr, src=0)
 
 
     
