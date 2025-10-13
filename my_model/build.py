@@ -1,5 +1,4 @@
-from my_model import objectives 
-from .model_person_search import ALBEF 
+from my_model.albef import ALBEF
 import torch 
 import torch.nn as nn 
 from collections import OrderedDict 
