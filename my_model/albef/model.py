@@ -286,7 +286,7 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
             )
 
         # ===== InfMasking (synergy) =====
-        enable_infmask = bool(config.get('enable_infmask_loss', True))
+        enable_infmask = bool(config.get('enable_infmask_loss', False))
         if enable_infmask:
             z_full = output_pos.last_hidden_state[:, 0, :]    # [B, D]
             # optional saliency per token (text) if previously computed for MLM

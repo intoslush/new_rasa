@@ -39,8 +39,8 @@ class InfMaskMixin(nn.Module):
 
         # ---- hyperparams with safe defaults
         K = int(config.get('infmask_K', 6))
-        keep_v_min, keep_v_max = config.get('infmask_keep_v_range', (0.1, 0.4))
-        keep_t_min, keep_t_max = config.get('infmask_keep_t_range', (0.1, 0.4))
+        keep_v_min, keep_v_max = config.get('infmask_keep_v_range', (0.1, 0.2))
+        keep_t_min, keep_t_max = config.get('infmask_keep_t_range', (0.1, 0.2))
         min_keep_v = int(config.get('infmask_min_keep_v', 3))
         min_keep_t = int(config.get('infmask_min_keep_t', 3))
         anchor_stop_grad = bool(config.get('infmask_anchor_stop_grad', True))

@@ -168,7 +168,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
                 loss_dict: Dict[str, torch.Tensor] = model(batch, alpha, config, epoch)
                 loss = 0.0
                 for k, v in loss_dict.items():
-                    w = dynamic_weights.get(k, config["weights"].get(k, 1.0))
+                    w = dynamic_weights.get(k, config["weights"].get(k, 0.5)) #默认 0.5
                     loss = loss + w * v
 
             optimizer.zero_grad(set_to_none=True)
