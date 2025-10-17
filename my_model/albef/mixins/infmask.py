@@ -32,6 +32,7 @@ class InfMaskMixin(nn.Module):
         epoch: int,
         saliency_text: Optional[torch.Tensor] = None,  # [B, L_t] optional token saliency
         saliency_image: Optional[torch.Tensor] = None, # [B, L_v] optional patch saliency
+        neg_filter: Optional[torch.Tensor] = None, # NEW: [B,B]，True=不要把它当负样本
     ) -> torch.Tensor:
         device = image_embeds.device
         B, L_v, D = image_embeds.shape
@@ -87,15 +88,17 @@ class InfMaskMixin(nn.Module):
                     B=B, L=L_t, keep_ratio=keep_t, min_keep=min_keep_t,
                     device=device, must_keep_cls=True,
                     saliency=(saliency_text if (use_saliency and saliency_text is not None) else None),
-                    saliency_phase=saliency_phase
-                )  # [B, L_t]
+                    saliency_phase=saliency_phase,
+                    valid_mask=text_atts.bool(),                     # NEW
+                )
             if mode in ('q_only', 'both'):
                 q_keep_mask = self._infmask_build_keep_mask(
                     B=B, L=L_v, keep_ratio=keep_v, min_keep=min_keep_v,
                     device=device, must_keep_cls=True,
                     saliency=(saliency_image if (use_saliency and saliency_image is not None) else None),
-                    saliency_phase=saliency_phase
-                )  # [B, L_v]
+                    saliency_phase=saliency_phase,
+                    valid_mask=image_atts.bool(),                    # NEW
+                )
 
             # apply masking to embeds & atts
             img_m, img_att_m = self._infmask_apply_image_mask(image_embeds, image_atts, q_keep_mask)
@@ -116,6 +119,12 @@ class InfMaskMixin(nn.Module):
             # InfoNCE over in-batch full CLS
             # logits[i, j] = <z_mask_i, z_full_j> / temp
             logits = (z_mask_n @ z_full_n.t()) / temp
+            if neg_filter is not None:
+                # 确保不影响对角正样本
+                diag = torch.eye(B, dtype=torch.bool, device=device)
+                mask = neg_filter.clone()
+                mask[diag] = False
+                logits = logits.masked_fill(mask, float('-inf'))
             loss_k = F.cross_entropy(logits, labels)
             losses.append(loss_k)
 
@@ -138,65 +147,92 @@ class InfMaskMixin(nn.Module):
         must_keep_cls: bool = True,
         saliency: Optional[torch.Tensor] = None,      # [B, L]
         saliency_phase: str = 'none',                 # 'none' | 'keep_top' | 'mask_top'
+        valid_mask: Optional[torch.Tensor] = None,    # [B, L] True=有效位（例如 attention_mask==1）
     ) -> torch.Tensor:
         """
-        Return boolean mask [B, L] where True=keep, False=mask.
-        If saliency is provided:
-          - keep_top : prefer keeping high-saliency tokens
-          - mask_top : prefer masking high-saliency tokens
+        返回布尔 keep 掩码 [B, L]（True=保留，False=遮挡），
+        仅在 valid_mask==True 的位置上进行采样与计数；CLS 位若 must_keep_cls=True 则强制保留。
+        - 随机模式：在有效位中等概率抽样到目标保留数（含 min_keep 约束）
+        - 显著性模式：
+            keep_top : 直接在有效位中选前 k 个显著 token
+            mask_top : 在有效位中遮前 (1-keep_ratio) 部分，剩余即为保留（严格比例）
         """
+        if valid_mask is None:
+            valid_mask = torch.ones(B, L, dtype=torch.bool, device=device)
+
         keep = torch.zeros(B, L, dtype=torch.bool, device=device)
-        k_target = max(1, int(round(keep_ratio * L)))
-        k_target = max(k_target, min_keep)
 
-        if saliency is None or saliency_phase == 'none':
-            # random keep
-            randv = torch.rand(B, L, device=device)
-            # threshold so that approx keep_ratio are kept; then ensure min_keep with top-k
-            thresh = torch.quantile(randv, q=1.0 - keep_ratio, dim=1, keepdim=True)
-            keep |= randv >= thresh
-        else:
-            # sort by saliency per sample
-            # higher saliency first
-            if saliency_phase == 'keep_top':
-                # keep top-k_target salient tokens
-                idx = torch.argsort(saliency, dim=1, descending=True)
-                topk = idx[:, :k_target]
-                keep.scatter_(1, topk, True)
+        for b in range(B):
+            valid_idx = torch.nonzero(valid_mask[b], as_tuple=False).flatten()
+            if valid_idx.numel() == 0:
+                # 无有效位：全 False，但如果需要保 CLS 且存在位置 0，则保留 0
+                if must_keep_cls and L > 0:
+                    keep[b, 0] = True
+                continue
+
+            # 以“有效长度”为准计算 k_target，并裁剪到 [min_keep, 有效长度]
+            eff_len = int(valid_idx.numel())
+            k_target = max(1, int(round(keep_ratio * eff_len)))
+            k_target = max(min_keep, k_target)
+            k_target = min(k_target, eff_len)
+
+            # 先处理必须保留的 CLS
+            picked = set()
+            if must_keep_cls and L > 0 and valid_mask[b, 0]:
+                keep[b, 0] = True
+                picked.add(0)
+
+            # 三种模式
+            if saliency is None or saliency_phase == 'none':
+                # 等概率随机：从有效位中（去掉已选 CLS）再采够 (k_target - 已选)
+                rest = valid_idx[~torch.isin(valid_idx, torch.tensor(list(picked), device=device))] if picked else valid_idx
+                need = k_target - len(picked)
+                if need > 0 and rest.numel() > 0:
+                    choose = rest[torch.randperm(rest.numel(), device=device)[:need]]
+                    keep[b, choose] = True
+
+            elif saliency_phase == 'keep_top':
+                s = saliency[b, valid_idx]
+                order = torch.argsort(s, dim=0, descending=True)    # 高显著优先
+                choose = valid_idx[order[:k_target]]
+                keep[b, choose] = True
+                if must_keep_cls and L > 0:
+                    keep[b, 0] = True  # 再次确保 CLS
+
             elif saliency_phase == 'mask_top':
-                # mask top salient tokens; keep the rest down to k_target tokens
-                idx = torch.argsort(saliency, dim=1, descending=True)
-                # propose to drop the first m, keep remaining tokens randomly until k_target
-                drop = idx[:, :max(1, int(0.5 * L))]  # drop at most half by saliency; rest random
-                keep[:] = True
-                keep.scatter_(1, drop, False)
-                # enforce at least k_target keeps
-                count = keep.sum(1)
-                need = torch.clamp(k_target - count, min=0)
-                for b in range(B):
-                    if need[b] > 0:
-                        # randomly add back some
-                        cand = (~keep[b]).nonzero(as_tuple=False).flatten()
-                        if cand.numel() > 0:
-                            add_idx = cand[torch.randperm(cand.numel(), device=device)[:need[b]]]
-                            keep[b, add_idx] = True
-            else:
-                # fallback random
-                randv = torch.rand(B, L, device=device)
-                thresh = torch.quantile(randv, q=1.0 - keep_ratio, dim=1, keepdim=True)
-                keep |= randv >= thresh
+                # 严格比例：在有效位中按显著性遮掉前 (1 - keep_ratio) 部分，其余为保留
+                s = saliency[b, valid_idx]
+                order = torch.argsort(s, dim=0, descending=True)    # 高显著在前
+                drop_cnt = max(0, eff_len - k_target)
+                drop_idx = valid_idx[order[:drop_cnt]]              # 这些被遮
+                keep[b, valid_idx] = True                           # 先全保留有效位
+                keep[b, drop_idx] = False                           # 再遮掉 top
+                if must_keep_cls and L > 0 and valid_mask[b, 0]:
+                    keep[b, 0] = True
 
-        # ensure min_keep and CLS kept
+            else:
+                # fallback 随机
+                rest = valid_idx[~torch.isin(valid_idx, torch.tensor(list(picked), device=device))] if picked else valid_idx
+                need = k_target - len(picked)
+                if need > 0 and rest.numel() > 0:
+                    choose = rest[torch.randperm(rest.numel(), device=device)[:need]]
+                    keep[b, choose] = True
+
+            # 兜底：若最终保留不足 min_keep（理论上不会，因为上面按有效长度算过），再补到 min_keep
+            cur = int(keep[b].logical_and(valid_mask[b]).sum().item())
+            if cur < min_keep:
+                rest = torch.nonzero(valid_mask[b] & (~keep[b]), as_tuple=False).flatten()
+                need = min_keep - cur
+                if need > 0 and rest.numel() > 0:
+                    add = rest[torch.randperm(rest.numel(), device=device)[:need]]
+                    keep[b, add] = True
+
+        # 保证 CLS（若存在）最终为 True
         if must_keep_cls and L > 0:
             keep[:, 0] = True
-        for b in range(B):
-            if keep[b].sum().item() < min_keep:
-                # randomly turn on to reach min_keep
-                off = (~keep[b]).nonzero(as_tuple=False).flatten()
-                if off.numel() > 0:
-                    add = off[torch.randperm(off.numel(), device=keep.device)[:(min_keep - int(keep[b].sum().item()))]]
-                    keep[b, add] = True
+
         return keep
+
 
     @staticmethod
     def _infmask_apply_text_mask(
