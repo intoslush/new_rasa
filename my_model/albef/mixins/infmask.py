@@ -66,7 +66,7 @@ class InfMaskMixin(nn.Module):
         
         min_keep_v = int(config.get('infmask_min_keep_v', 3))
         min_keep_t = int(config.get('infmask_min_keep_t', 3))
-        anchor_stop_grad = bool(config.get('infmask_anchor_stop_grad', True))
+        anchor_stop_grad = bool(config.get('infmask_anchor_stop_grad', False))
         use_saliency = bool(config.get('infmask_use_saliency', False))
         # phase: 'none' | 'keep_top' | 'mask_top'
         saliency_phase = str(config.get('infmask_saliency_phase', 'none'))

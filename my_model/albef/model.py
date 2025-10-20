@@ -81,6 +81,11 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
         self.copy_params()
         # Queues
         self._init_queues(embed_dim)
+        # === [A] InfMask 专属 TINY 头 & 独立温度 ===
+        d_inf = int(config.get('infmask_dim', 256))  # 目标维度（TINY）
+        self.infmask_head = nn.Linear(self.text_width, d_inf, bias=False)
+        self.infmask_ln   = nn.LayerNorm(d_inf)
+        self.infmask_temp = nn.Parameter(torch.tensor(float(config.get('infmask_temp', 0.07))))
 
     def forward(self, batch, alpha, config, epoch):  # text2 是概率同一个 id 的其他图片描述, img1/img2 同一图不同增广
         loss_dict = {}
@@ -281,5 +286,109 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                 return_dict=True,
                 mode='fusion',
             )
+
+        # ===== InfMasking (synergy) =====
+        enable_infmask = bool(config.get('enable_infmask_loss', True))
+        if enable_infmask:
+            # === [B] Teacher（动量塔）作为对齐目标 ===
+            with torch.no_grad():
+                self._momentum_update()  # MomentumMixin 里已有
+                image_embeds_m_t = self.visual_encoder_m(image1)
+                image_atts_m_t  = torch.ones(image_embeds_m_t.size()[:-1], dtype=torch.long, device=image1.device)
+                output_pos_m = self.text_encoder_m.bert(
+                    encoder_embeds=text_embeds,             # 与 student 相同的文本
+                    attention_mask=text_atts,
+                    encoder_hidden_states=image_embeds_m_t, # 老师的视觉编码
+                    encoder_attention_mask=image_atts_m_t,
+                    return_dict=True,
+                    mode='fusion',
+                )
+                z_full = output_pos_m.last_hidden_state[:, 0, :]  # [B, D]
+            # --- 负样本过滤矩阵：True 表示“不要把它当负样本” ---
+            B = z_full.size(0)
+            device = z_full.device
+            neg_filter = None
+
+            if bool(config.get('infmask_filter_negatives', True)):
+                # 1) 同伪标签样本（剔除对角线）
+                same_id = torch.eq(idx.view(-1, 1), idx.view(1, -1))    # [B,B]
+                not_diag = ~torch.eye(B, dtype=torch.bool, device=device)
+                neg_filter = (same_id & not_diag)
+
+                # 2) 可选：互为近邻（k-reciprocal），把“潜在正对”也剔除
+                if bool(config.get('infmask_use_knn_filter', False)):
+                    k = int(config.get('infmask_knn_k', 3))
+                    with torch.no_grad():
+                        z = F.normalize(z_full.detach(), dim=-1)
+                        sim = z @ z.t()
+                        sim = sim - torch.eye(B, device=device) * 1e9  # 去掉自相似
+                        k = min(k, max(1, B - 1))
+                        nbr = sim.topk(k=k, dim=1).indices             # [B,k]
+                        knn = torch.zeros(B, B, dtype=torch.bool, device=device)
+                        for i in range(B):
+                            knn[i, nbr[i]] = True
+                        mutual = knn & knn.t()
+                    neg_filter = neg_filter | (mutual & not_diag)
+
+            # optional saliency per token (text) if previously computed for MLM
+            sal_text = None
+            if config.get('infmask_use_saliency', False) and 'saliency' in locals():
+                sal_text = saliency
+
+            loss_infmask = self.compute_infmask_loss(
+                image_embeds=image_embeds.detach(),
+                text_embeds=text_embeds.detach(),
+                image_atts=image_atts,
+                text_atts=text_atts,
+                z_full=z_full,
+                config=config,
+                epoch=epoch,
+                saliency_text=sal_text,
+                saliency_image=None,
+                neg_filter=neg_filter,                     # NEW: 传入过滤矩阵
+            )
+            loss_dict['loss_infmask'] = loss_infmask
+
+
+        # ===== Optional sim alignment =====
+        enable_sim_loss = bool(config.get('enable_sim_loss', False))
+        if enable_sim_loss:
+            input_sim = text1.input_ids.clone()
+            labels_sim = input_sim.clone()
+            input_sim, labels_sim = self.mask(
+                input_sim,
+                self.text_encoder.config.vocab_size,
+                targets=labels_sim,
+                probability_matrix=(probability_matrix if probability_matrix is not None else None)
+            )
+            masked_text_out = self.text_encoder.bert(
+                input_ids=input_sim,
+                attention_mask=text1['attention_mask'],
+                return_dict=True,
+                mode='text',
+            )
+            masked_text_embeds = masked_text_out.last_hidden_state
+
+            image2_embeds = self.visual_encoder(image2)
+            image2_atts = torch.ones(image2_embeds.size()[:-1], dtype=torch.long, device=image2.device)
+
+            fused_masked = self.text_encoder.bert(
+                encoder_embeds=masked_text_embeds,
+                attention_mask=text1['attention_mask'],
+                encoder_hidden_states=image2_embeds,
+                encoder_attention_mask=image2_atts,
+                return_dict=True,
+                mode='fusion',
+            )
+
+            cls_itm_pos = output_pos.last_hidden_state[:, 0, :]
+            cls_masked  = fused_masked.last_hidden_state[:, 0, :]
+
+            if bool(config.get('sim_anchor_stop_grad', True)):
+                cls_itm_pos = cls_itm_pos.detach()
+
+            z_a = F.normalize(cls_itm_pos, dim=-1)
+            z_b = F.normalize(cls_masked,  dim=-1)
+            loss_dict['loss_sim'] = (1.0 - (z_a * z_b).sum(dim=-1)).mean()
 
         return loss_dict
