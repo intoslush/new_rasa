@@ -84,6 +84,11 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
 
         # Queues
         self._init_queues(embed_dim)
+        # === [A] InfMask 专属 TINY 头 & 独立温度 ===
+        d_inf = int(config.get('infmask_dim', 256))  # 目标维度（TINY）
+        self.infmask_head = nn.Linear(self.text_width, d_inf, bias=False)
+        self.infmask_ln   = nn.LayerNorm(d_inf)
+        self.infmask_temp = nn.Parameter(torch.tensor(float(config.get('infmask_temp', 0.07))))
 
     def forward(self, batch, alpha, config, epoch):  # text2 是概率同一个 id 的其他图片描述, img1/img2 同一图不同增广
         loss_dict = {}
@@ -138,7 +143,7 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
 
         # ===== Masked Language Modeling =====
         enable_mlm_loss = bool(config.get('enable_mlm_loss', True))
-        enable_soft_label = bool(config.get('mlm_soft_label', True))
+        enable_soft_label = bool(config.get('mlm_soft_label', False))
         probability_matrix = None  # ensure defined for later use
         image_embeds_m = None      # ensure defined if used below
         if enable_mlm_loss:
@@ -288,8 +293,20 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
         # ===== InfMasking (synergy) =====
         enable_infmask = bool(config.get('enable_infmask_loss', True))
         if enable_infmask:
-            z_full = output_pos.last_hidden_state[:, 0, :]    # [B, D]
-
+            # === [B] Teacher（动量塔）作为对齐目标 ===
+            with torch.no_grad():
+                self._momentum_update()  # MomentumMixin 里已有
+                image_embeds_m_t = self.visual_encoder_m(image1)
+                image_atts_m_t  = torch.ones(image_embeds_m_t.size()[:-1], dtype=torch.long, device=image1.device)
+                output_pos_m = self.text_encoder_m.bert(
+                    encoder_embeds=text_embeds,             # 与 student 相同的文本
+                    attention_mask=text_atts,
+                    encoder_hidden_states=image_embeds_m_t, # 老师的视觉编码
+                    encoder_attention_mask=image_atts_m_t,
+                    return_dict=True,
+                    mode='fusion',
+                )
+                z_full = output_pos_m.last_hidden_state[:, 0, :]  # [B, D]
             # --- 负样本过滤矩阵：True 表示“不要把它当负样本” ---
             B = z_full.size(0)
             device = z_full.device

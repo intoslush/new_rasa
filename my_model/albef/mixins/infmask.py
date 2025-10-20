@@ -37,11 +37,33 @@ class InfMaskMixin(nn.Module):
         device = image_embeds.device
         B, L_v, D = image_embeds.shape
         _, L_t, _ = text_embeds.shape
+        # === [C] 课程式调度：起始/坡度/K/keep 比例 ===
+        start_ep = int(config.get('infmask_start_epoch', 5))     # 第 5 个 epoch 开始启用
+        ramp_ep  = int(config.get('infmask_ramp_epochs', 10))    # 10 个 epoch 线性增强
+        K_min    = int(config.get('infmask_K_min', 2))
+        K_max    = int(config.get('infmask_K_max', 6))
+        # 文本/图像保留比例：从“高保留(弱遮挡)”→“低保留(强遮挡)”
+        keep_t_high, keep_t_low = config.get('infmask_keep_t_schedule', (0.7, 0.4))
+        keep_v_high, keep_v_low = config.get('infmask_keep_v_schedule', (0.7, 0.4))
 
-        # ---- hyperparams with safe defaults
-        K = int(config.get('infmask_K', 6))
-        keep_v_min, keep_v_max = config.get('infmask_keep_v_range', (0.1, 0.2))
-        keep_t_min, keep_t_max = config.get('infmask_keep_t_range', (0.1, 0.2))
+        if epoch < start_ep:
+            # 课程未开始：返回 0，不参与总 loss
+            return torch.zeros([], device=device, dtype=image_embeds.dtype)
+        # 线性进度 t ∈ [0,1]
+        t = min(1.0, max(0.0, (epoch - start_ep) / max(1, ramp_ep)))
+        K = int(round(K_min + t * (K_max - K_min)))
+
+        # 当前 epoch 的 keep 区间（上下界可设相同，保留原接口）
+        keep_t_min = keep_t_high + t * (keep_t_low - keep_t_high)
+        keep_t_max = keep_t_min
+        keep_v_min = keep_v_high + t * (keep_v_low - keep_v_high)
+        keep_v_max = keep_v_min
+        # # ---- hyperparams with safe defaults
+        # K = int(config.get('infmask_K', 6))
+        # keep_v_min, keep_v_max = config.get('infmask_keep_v_range', (0.1, 0.2))
+        # keep_t_min, keep_t_max = config.get('infmask_keep_t_range', (0.1, 0.2))
+        
+        
         min_keep_v = int(config.get('infmask_min_keep_v', 3))
         min_keep_t = int(config.get('infmask_min_keep_t', 3))
         anchor_stop_grad = bool(config.get('infmask_anchor_stop_grad', True))
@@ -65,10 +87,10 @@ class InfMaskMixin(nn.Module):
             modes_probs[k] = float(modes_probs[k]) / total_p
 
         # temperature
-        temp = self.temp if isinstance(self.temp, torch.Tensor) else torch.tensor(self.temp, device=device)
-
-        # normalize z_full for cosine-contrast
-        z_full_n = F.normalize(z_full.detach() if anchor_stop_grad else z_full, dim=-1)
+        temp = self.infmask_temp
+        if bool(config.get('infmask_freeze_temp', True)) and temp.requires_grad:
+            temp = temp.detach()
+        temp = temp.clamp(0.02, 0.2)
 
         # prepare labels for InfoNCE (positives are the diagonal)
         labels = torch.arange(B, device=device)
@@ -114,11 +136,16 @@ class InfMaskMixin(nn.Module):
                 mode='fusion',
             )
             z_mask = out_mask.last_hidden_state[:, 0, :]                 # [B, D_t]
-            z_mask_n = F.normalize(z_mask, dim=-1)                        # [B, D]
+            if anchor_stop_grad:
+                z_mask = z_mask.detach()
 
-            # InfoNCE over in-batch full CLS
-            # logits[i, j] = <z_mask_i, z_full_j> / temp
-            logits = (z_mask_n @ z_full_n.t()) / temp
+            z_full_p = self.infmask_ln(self.infmask_head(z_full))
+            z_mask_p = self.infmask_ln(self.infmask_head(z_mask))
+            z_full_p = F.normalize(z_full_p, dim=-1)
+            z_mask_p = F.normalize(z_mask_p, dim=-1)
+
+            logits = (z_mask_p @ z_full_p.t()) / temp
+
             if neg_filter is not None:
                 # 确保不影响对角正样本
                 diag = torch.eye(B, dtype=torch.bool, device=device)
@@ -128,7 +155,7 @@ class InfMaskMixin(nn.Module):
             loss_k = F.cross_entropy(logits, labels)
             losses.append(loss_k)
 
-        return torch.stack(losses, dim=0).mean() if len(losses) > 0 else torch.tensor(0.0, device=device)
+        return (torch.stack(losses, dim=0).mean() if len(losses) > 0  else torch.zeros([], device=device, dtype=image_embeds.dtype))
 
     # ----------------------
     # Helpers

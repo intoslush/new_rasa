@@ -71,6 +71,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
 
     # AMP
     use_amp = getattr(args, "use_amp", True) and device.type == "cuda"
+    logger.info(f"使用 AMP: {use_amp}")
     scaler = GradScaler(enabled=use_amp)
 
     # 获取 DDP 包裹的实际模型
@@ -85,42 +86,51 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
     best_log = {}
 
     for epoch in range(start_epoch, num_epoch + 1):
+        
+        if epoch<5 or epoch%2==1:
         # ========== 1) 伪标签：生成 & 广播 & 应用 ==========
         # 仅在较早阶段进行聚类（与旧逻辑一致：epoch < 40）
-        image_pseudo_labels = generate_and_broadcast_pseudo_labels(
-            epoch=epoch,
-            device=device,
-            is_main=is_main,
-            is_distributed=is_distributed,
-            rank=rank,
-            cluster_loader=cluster_loader,
-            model=model,
-            args=args,
-            config=config,
-            logger=logger,
-            tb_writer=tb_writer,
-            enable_nmi_ari=True,
-            cluster_until_epoch=40,
-        )
+            image_pseudo_labels = generate_and_broadcast_pseudo_labels(
+                epoch=epoch,
+                device=device,
+                is_main=is_main,
+                is_distributed=is_distributed,
+                rank=rank,
+                cluster_loader=cluster_loader,
+                model=model,
+                args=args,
+                config=config,
+                logger=logger,
+                tb_writer=tb_writer,
+                enable_nmi_ari=True,
+                cluster_until_epoch=40,
+            )
 
-        # 训练数据集应用伪标签 & 可选重置队列
-        train_loader.dataset.mode = 'train'
-        swap_epoch = getattr(args, "swap_epoch", 99)  # 不启用伪标签随机交换
-        if epoch > swap_epoch:
-            train_loader.dataset.set_augment_policy('pseudo')
-        train_loader.dataset.set_pseudo_labels(image_pseudo_labels.cpu())
+            # 训练数据集应用伪标签 & 可选重置队列
+            train_loader.dataset.mode = 'train'
+            swap_epoch = getattr(args, "swap_epoch", 99)  # 不启用伪标签随机交换
+            if epoch > swap_epoch:
+                train_loader.dataset.set_augment_policy('pseudo')
+            train_loader.dataset.set_pseudo_labels(image_pseudo_labels.cpu())
 
-        if bool(config.get('reset_queue_each_epoch', True)):
-            if is_distributed:
-                dist.barrier()
-            model.reset_queues(random_init=bool(config.get('queue_random_reinit', False)))
-            if is_main:
-                logger.info(
-                    f"[Rank {rank}] 已清空对比队列 (random_init={bool(config.get('queue_random_reinit', False))})"
-                )
-            if is_distributed:
-                dist.barrier()
-
+            if bool(config.get('reset_queue_each_epoch', True)):
+                if is_distributed:
+                    dist.barrier()
+                model.reset_queues(random_init=bool(config.get('queue_random_reinit', False)))
+                if is_main:
+                    logger.info(
+                        f"[Rank {rank}] 已清空对比队列 (random_init={bool(config.get('queue_random_reinit', False))})"
+                    )
+                if is_distributed:
+                    dist.barrier()
+            # ========== 3) 分布式 sampler 状态刷新 ==========
+        if is_distributed:
+            dist.barrier()
+            if hasattr(train_loader, 'sampler') and hasattr(train_loader.sampler, 'set_valid_indices'):
+                train_loader.sampler.set_valid_indices(train_loader.dataset.valid_indices)
+            if hasattr(train_loader, 'sampler') and hasattr(train_loader.sampler, 'set_epoch'):
+                train_loader.sampler.set_epoch(epoch)
+                
         # ========== 2) 调度器按 epoch 步进 ==========
         if epoch > 0:
             try:
@@ -128,13 +138,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
             except Exception:
                 scheduler.step()
 
-        # ========== 3) 分布式 sampler 状态刷新 ==========
-        if is_distributed:
-            dist.barrier()
-            if hasattr(train_loader, 'sampler') and hasattr(train_loader.sampler, 'set_valid_indices'):
-                train_loader.sampler.set_valid_indices(train_loader.dataset.valid_indices)
-            if hasattr(train_loader, 'sampler') and hasattr(train_loader.sampler, 'set_epoch'):
-                train_loader.sampler.set_epoch(epoch)
+        
 
         # ========== 4) 进入训练态 ==========
         model.train()
