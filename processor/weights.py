@@ -33,7 +33,7 @@ def compute_dynamic_weights(
 
     freeze = int(schedule.get("freeze_epochs", 20))
     # —— 保持与旧代码一致的行为（如需启用配置，请注释/删除下一行）——
-    freeze = 99#目前不启用
+    freeze = 5#目前不启用
 
     mode = schedule.get("mode", "linear")
 
@@ -53,23 +53,16 @@ def compute_dynamic_weights(
     if "min" in cl_cfg:
         w["loss_cl"] = _interp(base_weights.get("loss_cl", 0.0), float(cl_cfg["min"]), t, mode)
 
-    # loss_mlm：上升到最大值
-    mlm_cfg = schedule.get("loss_mlm", {})
-    if "max" in mlm_cfg:
-        w["loss_mlm"] = _interp(base_weights.get("loss_mlm", 0.0), float(mlm_cfg["max"]), t, mode)
+    # # loss_mlm：上升到最大值
+    # mlm_cfg = schedule.get("loss_mlm", {})
+    # if "max" in mlm_cfg:
+    #     w["loss_mlm"] = _interp(base_weights.get("loss_mlm", 0.0), float(mlm_cfg["max"]), t, mode)
 
-    # loss_pitm：下降/上升（旧代码写的是 "max"，保持一致）
-    pitm_cfg = schedule.get("loss_pitm", {})
-    if "max" in pitm_cfg:
-        w["loss_pitm"] = _interp(base_weights.get("loss_pitm", 0.0), float(pitm_cfg["max"]), t, mode)
+    # # loss_pitm：下降/上升（旧代码写的是 "max"，保持一致）
+    # pitm_cfg = schedule.get("loss_pitm", {})
+    # if "max" in pitm_cfg:
+    #     w["loss_pitm"] = _interp(base_weights.get("loss_pitm", 0.0), float(pitm_cfg["max"]), t, mode)
 
-    # （可选）保持权重和不变：让总权重与初始总和一致
-    if schedule.get("normalize_sum", False):
-        base_sum = sum(base_weights.values())
-        new_sum = sum(w.values())
-        if new_sum > 0:
-            scale = base_sum / new_sum
-            for k in w:
-                w[k] *= scale
+
 
     return w

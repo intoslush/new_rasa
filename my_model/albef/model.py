@@ -139,7 +139,7 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
             self._dequeue_and_enqueue(image_feat_m, text_feat_m, idx)
 
         # ===== Masked Language Modeling =====
-        enable_mlm_loss = bool(config.get('enable_mlm_loss', False))
+        enable_mlm_loss = bool(config.get('enable_mlm_loss', True))
         enable_soft_label = bool(config.get('mlm_soft_label', False))
         probability_matrix = None  # ensure defined for later use
         image_embeds_m = None      # ensure defined if used below

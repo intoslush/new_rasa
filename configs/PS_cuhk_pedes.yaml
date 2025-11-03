@@ -38,7 +38,7 @@ weights_schedule:
   mode: "cosine"        # 可改为 "cosine" 获得更平滑的变化linear
   normalize_sum: false  # 若希望总权重和保持不变可改为 true
   loss_cl:
-    min: 0.1            # 20 之后从 0.5 线性降到 0.1（到最后一个 epoch 达到）
+    min: 0            # 20 之后从 0.5 线性降到 0.1（到最后一个 epoch 达到）
   loss_mlm:
     max: 1.5 
   loss_itm:
