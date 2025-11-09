@@ -43,8 +43,8 @@ class InfMaskMixin(nn.Module):
         K_min    = int(config.get('infmask_K_min', 2))
         K_max    = int(config.get('infmask_K_max', 6))
         # 文本/图像保留比例：从“高保留(弱遮挡)”→“低保留(强遮挡)”
-        keep_t_high, keep_t_low = config.get('infmask_keep_t_schedule', (0.7, 0.4))
-        keep_v_high, keep_v_low = config.get('infmask_keep_v_schedule', (0.7, 0.4))
+        keep_t_high, keep_t_low = config.get('infmask_keep_t_schedule', (0.9, 0.5))
+        keep_v_high, keep_v_low = config.get('infmask_keep_v_schedule', (0.9, 0.5))
 
         if epoch < start_ep:
             # 课程未开始：返回 0，不参与总 loss
@@ -77,8 +77,8 @@ class InfMaskMixin(nn.Module):
 
         # modes probability
         modes_probs = config.get('infmask_modes_probs', {
-            'kv_only': 0.4,    # mask TEXT only (K/V side)
-            'q_only':  0.2,    # mask IMAGE only (Q side)
+            'kv_only': 0.5,    # mask IMAGE only (K/V side)
+            'q_only':  0.1,    # mask TEXT only (Q side)
             'both':    0.4,    # mask BOTH sides
         })
         # normalize
@@ -105,7 +105,7 @@ class InfMaskMixin(nn.Module):
             # build per-view masks (True=keep)
             kv_keep_mask = None
             q_keep_mask  = None
-            if mode in ('kv_only', 'both'):
+            if mode in ('q_only', 'both'):
                 kv_keep_mask = self._infmask_build_keep_mask(
                     B=B, L=L_t, keep_ratio=keep_t, min_keep=min_keep_t,
                     device=device, must_keep_cls=True,
@@ -113,7 +113,7 @@ class InfMaskMixin(nn.Module):
                     saliency_phase=saliency_phase,
                     valid_mask=text_atts.bool(),                     # NEW
                 )
-            if mode in ('q_only', 'both'):
+            if mode in ('kv_only', 'both'):
                 q_keep_mask = self._infmask_build_keep_mask(
                     B=B, L=L_v, keep_ratio=keep_v, min_keep=min_keep_v,
                     device=device, must_keep_cls=True,
@@ -136,9 +136,6 @@ class InfMaskMixin(nn.Module):
                 mode='fusion',
             )
             z_mask = out_mask.last_hidden_state[:, 0, :]                 # [B, D_t]
-            if anchor_stop_grad:
-                z_mask = z_mask.detach()
-
             z_full_p = self.infmask_ln(self.infmask_head(z_full))
             z_mask_p = self.infmask_ln(self.infmask_head(z_mask))
             z_full_p = F.normalize(z_full_p, dim=-1)
