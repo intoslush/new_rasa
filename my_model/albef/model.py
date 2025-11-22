@@ -287,16 +287,20 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                 mode='fusion',
             )
 
-        # ===== InfMasking (synergy) =====
+                # ===== InfMasking (synergy) =====
         enable_infmask = bool(config.get('enable_infmask_loss', True))
         if enable_infmask:
-            # === [B] Teacher（动量塔）作为对齐目标 ===
+            # === Teacher（动量塔）作为 full 视图对齐目标 ===
             with torch.no_grad():
-                self._momentum_update()  # MomentumMixin 里已有
+                self._momentum_update()
                 image_embeds_m_t = self.visual_encoder_m(image1)
-                image_atts_m_t  = torch.ones(image_embeds_m_t.size()[:-1], dtype=torch.long, device=image1.device)
+                image_atts_m_t  = torch.ones(
+                    image_embeds_m_t.size()[:-1],
+                    dtype=torch.long,
+                    device=image1.device,
+                )
                 output_pos_m = self.text_encoder_m.bert(
-                    encoder_embeds=text_embeds,             # 与 student 相同的文本
+                    encoder_embeds=text_embeds,             # 与 student 相同的文本 token
                     attention_mask=text_atts,
                     encoder_hidden_states=image_embeds_m_t, # 老师的视觉编码
                     encoder_attention_mask=image_atts_m_t,
@@ -304,38 +308,36 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                     mode='fusion',
                 )
                 z_full = output_pos_m.last_hidden_state[:, 0, :]  # [B, D]
-            # --- 负样本过滤矩阵：True 表示“不要把它当负样本” ---
+
             B = z_full.size(0)
             device = z_full.device
             neg_filter = None
-
             if bool(config.get('infmask_filter_negatives', True)):
-                # 1) 同伪标签样本（剔除对角线）
-                same_id = torch.eq(idx.view(-1, 1), idx.view(1, -1))    # [B,B]
+                same_id = torch.eq(idx.view(-1, 1), idx.view(1, -1))
                 not_diag = ~torch.eye(B, dtype=torch.bool, device=device)
                 neg_filter = (same_id & not_diag)
 
-                # 2) 可选：互为近邻（k-reciprocal），把“潜在正对”也剔除
                 if bool(config.get('infmask_use_knn_filter', False)):
                     k = int(config.get('infmask_knn_k', 3))
                     with torch.no_grad():
                         z = F.normalize(z_full.detach(), dim=-1)
                         sim = z @ z.t()
-                        sim = sim - torch.eye(B, device=device) * 1e9  # 去掉自相似
+                        sim = sim - torch.eye(B, device=device) * 1e9
                         k = min(k, max(1, B - 1))
-                        nbr = sim.topk(k=k, dim=1).indices             # [B,k]
+                        nbr = sim.topk(k=k, dim=1).indices
                         knn = torch.zeros(B, B, dtype=torch.bool, device=device)
                         for i in range(B):
                             knn[i, nbr[i]] = True
                         mutual = knn & knn.t()
                     neg_filter = neg_filter | (mutual & not_diag)
 
-            # optional saliency per token (text) if previously computed for MLM
             sal_text = None
             if config.get('infmask_use_saliency', False) and 'saliency' in locals():
                 sal_text = saliency
 
             loss_infmask = self.compute_infmask_loss(
+                image=image1,                                   # ★ 新增：原始图像
+                text_ids=text2['input_ids'],                    # ★ 新增：文本 token
                 image_embeds=image_embeds.detach(),
                 text_embeds=text_embeds.detach(),
                 image_atts=image_atts,
@@ -345,9 +347,10 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                 epoch=epoch,
                 saliency_text=sal_text,
                 saliency_image=None,
-                neg_filter=neg_filter,                     # NEW: 传入过滤矩阵
+                neg_filter=neg_filter,
             )
             loss_dict['loss_infmask'] = loss_infmask
+
 
 
         # ===== Optional sim alignment =====
