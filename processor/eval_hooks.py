@@ -49,6 +49,9 @@ def evaluate_and_checkpoint(
 
     # 保存最优
     if test_result.get('r1', -float('inf')) > best:
+        best = test_result['r1']
+        best_epoch = epoch
+        best_log = log_stats
         save_obj = {
             'model': model_without_ddp.state_dict(),
             'optimizer': optimizer.state_dict(),
@@ -60,8 +63,6 @@ def evaluate_and_checkpoint(
         }
         os.makedirs(os.path.join(output_dir, "checkpoint"), exist_ok=True)
         torch.save(save_obj, os.path.join(output_dir, "checkpoint", 'checkpoint_best.pth'))
-        best = test_result['r1']
-        best_epoch = epoch
-        best_log = log_stats
+        
 
     return best, best_epoch, best_log
