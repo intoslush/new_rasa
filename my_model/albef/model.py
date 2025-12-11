@@ -103,7 +103,27 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
         idx = batch['pseudo_label']  # 覆盖为伪标签，保持原逻辑
 
         # extract image features
-        image_embeds = self.visual_encoder(image1)
+        image_embeds = self.visual_encoder(image1,register_blk=-1)
+        # === 图像显著性：从 CLS→patch attention 中抽 ===
+        attn = self.visual_encoder.blocks[-1].attn.get_attention_map()
+        attn_mean = attn.mean(dim=1)              # [B, N, N]
+        patch_scores = attn_mean[:, 0, 1:]        # [B, P] CLS→所有 patch 的权重
+
+        B, P = patch_scores.shape
+        min_v = patch_scores.view(B, -1).min(dim=-1, keepdim=True)[0]
+        max_v = patch_scores.view(B, -1).max(dim=-1, keepdim=True)[0]
+        patch_scores = (patch_scores - min_v) / (max_v - min_v + 1e-6)  # [B, P] ∈ [0,1]
+
+        # 拼 CLS 的显著性（简单置 1），并 detach，防止梯度回流到 attn
+        saliency_image = torch.cat(
+            [
+                torch.ones(B, 1, device=image1.device, dtype=patch_scores.dtype),
+                patch_scores,
+            ],
+            dim=1,      # [B, 1+P]，和 image_embeds 的 token 数对齐
+        ).detach()
+        
+        
         image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(image1.device)
         image_feat = F.normalize(self.vision_proj(image_embeds[:, 0, :]), dim=-1)
 
@@ -178,8 +198,9 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                 input_ids,
                 self.text_encoder.config.vocab_size,
                 targets=labels,
-                probability_matrix=None  # 与 InfMasking 解耦，若需可替换为 probability_matrix
+                probability_matrix=probability_matrix  # 显著性引导的 mask 概率
             )
+
             debug_mask_epoch = config.get('debug_mask_epoch', 99)
             if epoch > debug_mask_epoch:
                 self.debug_render_mask_diff(
@@ -228,7 +249,6 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
 
         # ===== ITM (matched/unmatched) =====
         enable_itm_loss = bool(config.get('enable_itm_loss', True))
-        enable_soft_itm = bool(config.get('itm_soft_label', False))  # ✱ 新增开关
         if enable_itm_loss:
             # --- 学生：正样本 (text2, image1) ---
             output_pos = self.text_encoder.bert(
@@ -240,10 +260,9 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                 mode='fusion',
             )
 
-            # --- 学生：用相似度采负样本（保持原逻辑） ---
+            # --- 学生：相似度采负样本（保持原逻辑） ---
             with torch.no_grad():
                 bs = image1.size(0)
-                # 如果 CL 关了，就用 in-batch cos sim
                 if not enable_cl_loss:
                     sim_i2t = image_feat @ text_feat.t()
                     sim_t2i = text_feat @ image_feat.t()
@@ -256,14 +275,12 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                 weights_i2t.masked_fill_(mask, 0)
                 weights_t2i.masked_fill_(mask, 0)
 
-            # 按权重采样负图 / 负文
             image_neg_idx = torch.multinomial(weights_t2i, 1).flatten()
             image_embeds_neg = image_embeds[image_neg_idx]
             text_neg_idx = torch.multinomial(weights_i2t, 1).flatten()
             text_embeds_neg = text_embeds[text_neg_idx]
             text_atts_neg = text_atts[text_neg_idx]
 
-            # --- 学生：负样本 cross-fusion ---
             text_embeds_all = torch.cat([text_embeds, text_embeds_neg], dim=0)
             text_atts_all = torch.cat([text_atts, text_atts_neg], dim=0)
             image_embeds_all = torch.cat([image_embeds_neg, image_embeds], dim=0)
@@ -278,93 +295,26 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                 mode='fusion',
             )
 
+            # CLS 拼接：前 bs 个是正样本
             vl_embeddings = torch.cat([
-                output_pos.last_hidden_state[:, 0, :],
-                output_neg_cross.last_hidden_state[:, 0, :]
-            ], dim=0)
-            vl_output = self.itm_head(vl_embeddings)
+                output_pos.last_hidden_state[:, 0, :],              # [bs, D]
+                output_neg_cross.last_hidden_state[:, 0, :],        # [2*bs, D]
+            ], dim=0)                                              # [3*bs, D]
+            vl_output = self.itm_head(vl_embeddings)               # [3*bs, 2]
 
             itm_labels = torch.cat([
                 torch.ones(bs, dtype=torch.long),
                 torch.zeros(2 * bs, dtype=torch.long)
             ], dim=0).to(image1.device)
 
-            # --- 软标签版本：用动量教师给 logit 变软 ---
-            if enable_soft_itm:
-                with torch.no_grad():
-                    # 和 CL / InfMask 一样，先更新动量塔
-                    self._momentum_update()
-
-                    # 动量图像编码
-                    image_embeds_m = self.visual_encoder_m(image1)
-                    image_atts_m = torch.ones(
-                        image_embeds_m.size()[:-1],
-                        dtype=torch.long,
-                        device=image1.device,
-                    )
-                    image_embeds_neg_m = image_embeds_m[image_neg_idx]
-
-                    # 动量文本编码（text 模式）
-                    text_output_m = self.text_encoder_m.bert(
-                        text2['input_ids'],
-                        attention_mask=text_atts,
-                        return_dict=True,
-                        mode='text',
-                    )
-                    text_embeds_m = text_output_m.last_hidden_state
-                    text_embeds_neg_m = text_embeds_m[text_neg_idx]
-                    text_atts_neg_m = text_atts_neg  # mask 同样索引即可
-
-                    # 动量正样本 fusion (text2, image1)
-                    output_pos_m = self.text_encoder_m.bert(
-                        encoder_embeds=text_embeds_m,
-                        attention_mask=text_atts,
-                        encoder_hidden_states=image_embeds_m,
-                        encoder_attention_mask=image_atts_m,
-                        return_dict=True,
-                        mode='fusion',
-                    )
-
-                    # 动量负样本 fusion，顺序与学生完全一致
-                    text_embeds_all_m = torch.cat([text_embeds_m, text_embeds_neg_m], dim=0)
-                    text_atts_all_m = torch.cat([text_atts, text_atts_neg_m], dim=0)
-                    image_embeds_all_m = torch.cat([image_embeds_neg_m, image_embeds_m], dim=0)
-                    image_atts_all_m = torch.cat([image_atts_m, image_atts_m], dim=0)
-
-                    output_neg_cross_m = self.text_encoder_m.bert(
-                        encoder_embeds=text_embeds_all_m,
-                        attention_mask=text_atts_all_m,
-                        encoder_hidden_states=image_embeds_all_m,
-                        encoder_attention_mask=image_atts_all_m,
-                        return_dict=True,
-                        mode='fusion',
-                    )
-
-                    vl_embeddings_m = torch.cat([
-                        output_pos_m.last_hidden_state[:, 0, :],
-                        output_neg_cross_m.last_hidden_state[:, 0, :]
-                    ], dim=0)
-                    vl_output_m = self.itm_head_m(vl_embeddings_m)
-
-                    # 老师的 soft label（2 类 softmax 概率）
-                    soft_targets = F.softmax(vl_output_m, dim=-1)
-
-                # 跟 CL 一样：teacher 分布 + one-hot 伪标签做 convex combination
-                hard_targets = F.one_hot(
-                    itm_labels, num_classes=vl_output.size(-1)
-                ).float()
-                mixed_targets = alpha * soft_targets + (1.0 - alpha) * hard_targets
-
-                log_probs = F.log_softmax(vl_output, dim=-1)
-                loss_itm = -(mixed_targets * log_probs).sum(dim=-1).mean()
-            else:
-                # 原来的硬标签 CE
-                loss_itm = F.cross_entropy(vl_output, itm_labels)
-
+            # 纯硬标签 CE
+            loss_itm = F.cross_entropy(vl_output, itm_labels)
             loss_dict['loss_itm'] = loss_itm
 
+            # 正样本 logits，用于后面的 ITM consistency
+            vl_output_pos_full = vl_output[:bs].detach()
         else:
-            # still compute output_pos for InfMasking alignment if needed
+            # 仍然要给 output_pos 一个定义，供后续 InfMask / consistency 使用
             output_pos = self.text_encoder.bert(
                 encoder_embeds=text_embeds,
                 attention_mask=text_atts,
@@ -373,8 +323,101 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                 return_dict=True,
                 mode='fusion',
             )
+            vl_output_pos_full = None
+            
 
-                # ===== InfMasking (synergy) =====
+        # ===== ITM consistency：masked 视图与 full 视图对齐 =====
+        enable_itm_cons = bool(config.get('enable_itm_consistency', True))
+        if enable_itm_loss and enable_itm_cons and (vl_output_pos_full is not None):
+            bs = image1.size(0)
+            device = image1.device
+
+            # keep 比例可以单独配，尽量不要太狠
+            keep_t_ratio = float(config.get('itm_cons_keep_t', 0.6))
+            keep_v_ratio = float(config.get('itm_cons_keep_v', 0.6))
+            min_keep_t = int(config.get('itm_cons_min_keep_t', 3))
+            min_keep_v = int(config.get('itm_cons_min_keep_v', 3))
+
+            use_saliency = bool(config.get('infmask_use_saliency', True))
+            sal_text_for_itm = saliency if (use_saliency and 'saliency' in locals()) else None
+            sal_img_for_itm = saliency_image if use_saliency else None
+            saliency_phase = str(config.get('infmask_saliency_phase', 'none'))
+
+            # --- 文本 keep mask（对 text2） ---
+            B, L_t = text2['input_ids'].shape
+            kv_keep_mask = self._infmask_build_keep_mask(
+                B=B,
+                L=L_t,
+                keep_ratio=keep_t_ratio,
+                min_keep=min_keep_t,
+                device=device,
+                must_keep_cls=True,
+                saliency=sal_text_for_itm,
+                saliency_phase=saliency_phase,
+                valid_mask=text_atts.bool(),
+            )
+
+            # --- 图像 keep mask（对 image1 的 token） ---
+            _, L_v, _ = image_embeds.shape
+            q_keep_mask = self._infmask_build_keep_mask(
+                B=B,
+                L=L_v,
+                keep_ratio=keep_v_ratio,
+                min_keep=min_keep_v,
+                device=device,
+                must_keep_cls=True,
+                saliency=sal_img_for_itm,
+                saliency_phase=saliency_phase,
+                valid_mask=image_atts.bool(),
+            )
+
+            # 输入级别 masking
+            text_ids_m, text_atts_m = self._infmask_apply_text_input_mask(
+                text_ids=text2['input_ids'],
+                text_atts=text_atts,
+                keep_mask=kv_keep_mask,
+                mask_token_id=self.tokenizer.mask_token_id,
+            )
+            image_m, image_atts_m = self._infmask_apply_image_input_mask(
+                image=image1,
+                image_embeds=image_embeds,
+                image_atts=image_atts,
+                keep_mask=q_keep_mask,
+            )
+
+            # 重新编码 masked 文本 / 图像
+            text_out_m = self.text_encoder.bert(
+                text_ids_m,
+                attention_mask=text_atts_m,
+                return_dict=True,
+                mode='text',
+            )
+            text_embeds_m = text_out_m.last_hidden_state
+            image_embeds_m = self.visual_encoder(image_m)
+
+            # 融合得到 masked 视图 CLS
+            output_pos_mask = self.text_encoder.bert(
+                encoder_embeds=text_embeds_m,
+                attention_mask=text_atts_m,
+                encoder_hidden_states=image_embeds_m,
+                encoder_attention_mask=image_atts_m,
+                return_dict=True,
+                mode='fusion',
+            )
+            cls_mask = output_pos_mask.last_hidden_state[:, 0, :]
+            logits_mask = self.itm_head(cls_mask)   # [bs, 2]
+
+            # self-teacher：full 视图的正样本 logits，stop-grad
+            T_cons = float(config.get('itm_cons_temp', 1.0))
+            with torch.no_grad():
+                p_t = F.softmax(vl_output_pos_full / T_cons, dim=-1)
+
+            log_p_s = F.log_softmax(logits_mask / T_cons, dim=-1)
+            loss_itm_cons = F.kl_div(log_p_s, p_t, reduction='batchmean') * (T_cons * T_cons)
+            loss_dict['loss_itm_cons'] = loss_itm_cons
+            
+            
+        # ===== InfMasking (synergy) =====
         enable_infmask = bool(config.get('enable_infmask_loss', False))
         if enable_infmask:
             # === Teacher（动量塔）作为 full 视图对齐目标 ===
@@ -404,27 +447,15 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                 not_diag = ~torch.eye(B, dtype=torch.bool, device=device)
                 neg_filter = (same_id & not_diag)
 
-                if bool(config.get('infmask_use_knn_filter', False)):
-                    k = int(config.get('infmask_knn_k', 3))
-                    with torch.no_grad():
-                        z = F.normalize(z_full.detach(), dim=-1)
-                        sim = z @ z.t()
-                        sim = sim - torch.eye(B, device=device) * 1e9
-                        k = min(k, max(1, B - 1))
-                        nbr = sim.topk(k=k, dim=1).indices
-                        knn = torch.zeros(B, B, dtype=torch.bool, device=device)
-                        for i in range(B):
-                            knn[i, nbr[i]] = True
-                        mutual = knn & knn.t()
-                    neg_filter = neg_filter | (mutual & not_diag)
+            # 文本显著性
+            sal_text = saliency if ('saliency' in locals()) else None
 
-            sal_text = None
-            if config.get('infmask_use_saliency', False) and 'saliency' in locals():
-                sal_text = saliency
+            # 图像显著性：前面已经算好 saliency_image
+            sal_img = saliency_image
 
             loss_infmask = self.compute_infmask_loss(
-                image=image1,                                   # ★ 新增：原始图像
-                text_ids=text2['input_ids'],                    # ★ 新增：文本 token
+                image=image1,
+                text_ids=text2['input_ids'],
                 image_embeds=image_embeds.detach(),
                 text_embeds=text_embeds.detach(),
                 image_atts=image_atts,
@@ -433,52 +464,9 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                 config=config,
                 epoch=epoch,
                 saliency_text=sal_text,
-                saliency_image=None,
+                saliency_image=sal_img,
                 neg_filter=neg_filter,
             )
             loss_dict['loss_infmask'] = loss_infmask
-
-
-
-        # ===== Optional sim alignment =====
-        enable_sim_loss = bool(config.get('enable_sim_loss', False))
-        if enable_sim_loss:
-            input_sim = text1.input_ids.clone()
-            labels_sim = input_sim.clone()
-            input_sim, labels_sim = self.mask(
-                input_sim,
-                self.text_encoder.config.vocab_size,
-                targets=labels_sim,
-                probability_matrix=(probability_matrix if probability_matrix is not None else None)
-            )
-            masked_text_out = self.text_encoder.bert(
-                input_ids=input_sim,
-                attention_mask=text1['attention_mask'],
-                return_dict=True,
-                mode='text',
-            )
-            masked_text_embeds = masked_text_out.last_hidden_state
-
-            image2_embeds = self.visual_encoder(image2)
-            image2_atts = torch.ones(image2_embeds.size()[:-1], dtype=torch.long, device=image2.device)
-
-            fused_masked = self.text_encoder.bert(
-                encoder_embeds=masked_text_embeds,
-                attention_mask=text1['attention_mask'],
-                encoder_hidden_states=image2_embeds,
-                encoder_attention_mask=image2_atts,
-                return_dict=True,
-                mode='fusion',
-            )
-
-            cls_itm_pos = output_pos.last_hidden_state[:, 0, :]
-            cls_masked  = fused_masked.last_hidden_state[:, 0, :]
-
-            if bool(config.get('sim_anchor_stop_grad', True)):
-                cls_itm_pos = cls_itm_pos.detach()
-
-            z_a = F.normalize(cls_itm_pos, dim=-1)
-            z_b = F.normalize(cls_masked,  dim=-1)
-            loss_dict['loss_sim'] = (1.0 - (z_a * z_b).sum(dim=-1)).mean()
 
         return loss_dict

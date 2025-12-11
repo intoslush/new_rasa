@@ -12,28 +12,79 @@ class SaliencyMixin:
     ) -> torch.Tensor:
         """
         返回 shape [B, L] 的文本 token 显著性，按样本缩放到 [0,1]。
+        显著性 = 若干个带 cross-attn 的层里，token 表征在该层“前后变化量”的平均值。
         """
+
+        # 1. 跑一遍多模态 BERT，拿到所有层的 hidden_states
         out = self.text_encoder.bert(
             input_ids=text_ids,
             attention_mask=attention_mask,
             encoder_hidden_states=image_embeds,
             encoder_attention_mask=image_atts,
-            output_attentions=True,
+            output_hidden_states=True,   # 关键
+            output_attentions=False,     # 不再需要 cross_attentions 了
             return_dict=True,
             mode='multi_modal',
         )
-        attn_list = out.cross_attentions[-layers:]
-        attn = torch.stack(attn_list, dim=0).mean(0)  # [B, H, L, S]
-        sal = attn.mean(1).sum(-1)                    # [B, L]
 
-        # 只保留有效 token，并按样本缩放到 [0,1]
+        hidden_states = out.hidden_states  # tuple，长度 = num_layers + 1，每个 [B, L, D]
+
+        # 2. 找出哪些层是带 cross-attention 的层
+        #    你的 BertLayer 里用 config.fusion_layer 来决定是否有 cross-attention
+        if hasattr(self.text_encoder, "bert"):
+            cfg = self.text_encoder.bert.config
+        else:
+            cfg = self.text_encoder.config
+
+        fusion_layer = getattr(cfg, "fusion_layer", 0)
+        num_layers = cfg.num_hidden_layers
+
+        # cross-attn 层的下标：fusion_layer, fusion_layer+1, ..., num_layers-1
+        cross_layer_indices = list(range(fusion_layer, num_layers))
+        if len(cross_layer_indices) == 0:
+            # 极端情况：没有显式 cross-attn，就退化成用最后几层的 block 差
+            cross_layer_indices = list(range(max(0, num_layers - layers), num_layers))
+
+        # 只取最后 `layers` 个 cross-attn 层
+        if layers is not None and layers > 0 and layers < len(cross_layer_indices):
+            cross_layer_indices = cross_layer_indices[-layers:]
+
+        # 3. 对每个选中的层 l，算：
+        #    delta_l = || h_after(l) - h_before(l) ||_2
+        #    这里 h_before(l) = hidden_states[l]   （上一层输出）
+        #         h_after(l)  = hidden_states[l+1] （当前层输出）
+        #    注意：这包含了该层的 self-attn + cross-attn + FFN 整个 block 的效果，
+        #          但我们只在“带 cross-attn 的层”上算，所以可以视为“这一层 cross-modal 交互造成的变化”。
+        deltas = []
+        for layer_idx in cross_layer_indices:
+            h_before = hidden_states[layer_idx]     # [B, L, D]
+            h_after = hidden_states[layer_idx + 1]  # [B, L, D]
+
+            # 为了数值稳定，转成 float 做 L2 范数
+            diff = (h_after - h_before).float()
+            delta = diff.pow(2).sum(-1).sqrt()      # [B, L]
+            deltas.append(delta)
+
+        if len(deltas) == 0:
+            # 理论上不会走到这里，保险兜底：全 0 显著性
+            sal = torch.zeros_like(attention_mask, dtype=torch.float32)
+        else:
+            # 在所选层上做平均，得到最终 per-token saliency
+            sal = torch.stack(deltas, dim=0).mean(0)   # [B, L]
+
+        # 4. 只保留有效 token，并按样本内做 min-max 归一到 [0,1]
         sal = sal * attention_mask  # PAD 位置为 0
+
+        # 有效 token 的最小 / 最大值（忽略 PAD）
         sal_min = sal.masked_fill(attention_mask == 0, 1e9).amin(dim=1, keepdim=True)
         sal_min = torch.where(torch.isinf(sal_min), torch.zeros_like(sal_min), sal_min)
         sal_max = sal.amax(dim=1, keepdim=True)
+
         denom = (sal_max - sal_min).clamp(min=1e-6)
-        sal_norm = ((sal - sal_min) / denom) * attention_mask
+        sal_norm = ((sal - sal_min) / denom) * attention_mask  # 再把 PAD 清 0
+
         return sal_norm
+
 
     @torch.no_grad()
     def build_curriculum_mask_probs(

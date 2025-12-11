@@ -42,8 +42,8 @@ class InfMaskMixin(nn.Module):
         K_min    = int(config.get('infmask_K_min', 2))
         K_max    = int(config.get('infmask_K_max', 6))
 
-        keep_t_high, keep_t_low = config.get('infmask_keep_t_schedule', (0.9, 0.5))
-        keep_v_high, keep_v_low = config.get('infmask_keep_v_schedule', (0.9, 0.5))
+        keep_t_high, keep_t_low = config.get('infmask_keep_t_schedule', (0.9, 0.6))
+        keep_v_high, keep_v_low = config.get('infmask_keep_v_schedule', (0.9, 0.6))
 
         if epoch < start_ep:
             # 课程未开始：不启用 InfMask，返回 0

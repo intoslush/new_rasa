@@ -147,15 +147,36 @@ class VisionTransformer(nn.Module):
     def no_weight_decay(self):
         return {'pos_embed', 'cls_token'}
 
-    def forward(self, x, register_blk=-1):
+    def forward(self, x, register_blk=None):
+        """
+        Args:
+            x: [B, 3, H, W]
+            register_blk:
+                - None: 不保存任何 block 的 attention
+                - 非负整数 k: 只在第 k 个 block 保存 attention
+                - 负数（比如 -1）: 按 Python 负索引规则映射到倒数第几层
+        """
         B = x.shape[0]
         x = self.patch_embed(x)
-        cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
+        cls_tokens = self.cls_token.expand(B, -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
-        x = x + self.pos_embed[:,:x.size(1),:]
+        x = x + self.pos_embed[:, :x.size(1), :]
         x = self.pos_drop(x)
-        for i,blk in enumerate(self.blocks):
-            x = blk(x, register_blk==i)
+
+        # 处理 register_blk
+        if isinstance(register_blk, int):
+            if register_blk < 0:
+                register_blk = len(self.blocks) + register_blk  # -1 -> 最后一层
+            # 可选：简单防御
+            if not (0 <= register_blk < len(self.blocks)):
+                raise ValueError(f"register_blk {register_blk} out of range [0, {len(self.blocks)-1}]")
+        else:
+            register_blk = None  # 显式设为 None，表示不注册
+
+        for i, blk in enumerate(self.blocks):
+            do_register = (register_blk is not None and i == register_blk)
+            x = blk(x, register_hook=do_register)
+
         x = self.norm(x)
         return x
 
