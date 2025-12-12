@@ -167,7 +167,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
 
             if n_iter % args.log_period == 0:
                 logger.info(f"开始 epoch {epoch} 的第 {n_iter}/{len(train_loader)} 个 batch 的 loss 计算")
-
+            batch["global_step"]=global_step
             with autocast(device_type=device.type, enabled=use_amp):
                 loss_dict: Dict[str, torch.Tensor] = model(batch, alpha, config, epoch)
                 loss = 0.0

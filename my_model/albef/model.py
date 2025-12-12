@@ -168,7 +168,7 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
         probability_matrix = None  # ensure defined for later use
         image_embeds_m = None      # ensure defined if used below
         if enable_mlm_loss:
-            saliency_compute_epoch = config.get('saliency_compute_epoch', 99)
+            saliency_compute_epoch = config.get('saliency_compute_epoch', 6)
             if epoch > saliency_compute_epoch:
                 with torch.no_grad():
                     saliency = self.compute_cross_modal_saliency(
@@ -200,18 +200,41 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                 targets=labels,
                 probability_matrix=probability_matrix  # 显著性引导的 mask 概率
             )
+            
 
-            debug_mask_epoch = config.get('debug_mask_epoch', 99)
-            if epoch > debug_mask_epoch:
-                self.debug_render_mask_diff(
-                    epoch=epoch,
+            # === NEW: 10 epoch 后：随机写日志（mask + 逐层范数） ===
+            debug_epoch = int(config.get('debug_mask_epoch', 10))
+            if epoch >= debug_epoch and bool(config.get("debug_log_saliency", True)):
+                # 注意：这里用 text1（被 MLM mask 的那份）做 saliency 更直观
+                with torch.no_grad():
+                    sal_layers = int(config.get("debug_saliency_layers", 3))
+                    sal_norm, layer_deltas, layer_indices = self.compute_cross_modal_saliency(
+                        text_ids=text1['input_ids'],
+                        attention_mask=text1['attention_mask'],
+                        image_embeds=image_embeds,
+                        image_atts=image_atts,
+                        layers=sal_layers,
+                        return_layer_deltas=True,
+                    )
+
+                # 你要输出到当前目录 mask_output.txt
+                self.debug_render_mask_with_norms(
+                    epoch=int(epoch),
+                    step=int(batch.get("global_step", 0)),   # 没有就传 n_iter/全局计数
                     input_ids_before=ids_before_debug,
                     input_ids_after=input_ids,
                     targets=labels,
                     attention_mask=text1['attention_mask'],
+                    probability_matrix=(probability_matrix if probability_matrix is not None else None),
+                    saliency_norm=sal_norm,
+                    layer_deltas=layer_deltas,
+                    layer_indices=layer_indices,
                     raw_texts=batch.get('caption1', None),
-                    limit_per_epoch=int(config.get('debug_mask_limit_per_epoch', 50)),
-                    out_path=config.get('debug_mask_file', None),
+                    out_path=str(config.get("debug_mask_file", "./mask_output.txt")),
+                    limit_per_epoch=int(config.get("debug_mask_limit_per_epoch", 30)),
+                    sample_per_step=int(config.get("debug_sample_per_step", 2)),
+                    topk_tokens=int(config.get("debug_topk_tokens", 8)),
+                    step_prob=float(config.get("debug_step_prob", 0.15)),
                 )
             if enable_soft_label:
                 with torch.no_grad():

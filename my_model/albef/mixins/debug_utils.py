@@ -1,55 +1,62 @@
 import os
 import torch
 
+import os
+import torch
+
 class DebugMaskMixin:
     @torch.no_grad()
-    def debug_render_mask_diff(
+    def debug_render_mask_with_norms(
         self,
+        *,
         epoch: int,
-        input_ids_before: torch.Tensor,   # [B, L]
-        input_ids_after: torch.Tensor,    # [B, L]
-        targets: torch.Tensor,            # [B, L]
-        attention_mask: torch.Tensor,     # [B, L]
+        step: int,
+        input_ids_before: torch.Tensor,   # [B,L]
+        input_ids_after: torch.Tensor,    # [B,L]
+        targets: torch.Tensor,            # [B,L] -100 means not masked
+        attention_mask: torch.Tensor,     # [B,L]
+        probability_matrix: torch.Tensor = None,  # [B,L] 可选
+        saliency_norm: torch.Tensor = None,       # [B,L] 可选
+        layer_deltas: torch.Tensor = None,        # [nL,B,L] 可选
+        layer_indices=None,                       # list[int]
         raw_texts=None,
-        limit_per_epoch: int = 50,
-        out_path: str = None,
-    ) -> None:
-        """
-        将原句、掩码后句子、被 mask 的词及替换情况**追加**写入同一个文件。
-        分布式时仅 rank 0 写；每个 epoch 最多写 limit_per_epoch 条。
-        """
+        out_path: str = "./mask_output.txt",
+        limit_per_epoch: int = 30,
+        sample_per_step: int = 2,
+        topk_tokens: int = 8,
+        step_prob: float = 0.15,
+    ):
+        # DDP: only rank0
         if torch.distributed.is_initialized():
-            try:
-                if torch.distributed.get_rank() != 0:
-                    return
-            except Exception:
-                pass
+            if torch.distributed.get_rank() != 0:
+                return
 
-        if out_path is None:
-            out_path = getattr(self, "debug_mask_file", None)
-            if out_path is None:
-                out_path = getattr(self, "config_debug_mask_file", None) or "./mask_debug/mask_debug_all.txt"
+        # 触发概率（降低IO）
+        if step_prob < 1.0:
+            if torch.rand(1).item() > float(step_prob):
+                return
 
-        out_dir = os.path.dirname(out_path)
-        if out_dir:
-            os.makedirs(out_dir, exist_ok=True)
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
 
-        if not hasattr(self, "_dbg_written_per_epoch"):
-            self._dbg_written_per_epoch = {}
-
-        written = int(self._dbg_written_per_epoch.get(int(epoch), 0))
+        if not hasattr(self, "_dbg_written_per_epoch2"):
+            self._dbg_written_per_epoch2 = {}
+        written = int(self._dbg_written_per_epoch2.get(int(epoch), 0))
         if written >= limit_per_epoch:
             return
 
         B, L = input_ids_before.shape
-        to_write_blocks = []
 
+        # 随机挑样本（更“随机”）
+        perm = torch.randperm(B, device=input_ids_before.device)
+        pick = perm[: min(int(sample_per_step), B)].tolist()
+
+        blocks = []
         if written == 0:
-            sep = "=" * 100
-            to_write_blocks.append(f"\n{sep}\n[Epoch {int(epoch)}]  Mask Debug\n{sep}\n")
+            sep = "=" * 110
+            blocks.append(f"\n{sep}\n[Epoch {int(epoch)} | step {int(step)}] Mask+Norm Debug\n{sep}\n")
 
-        for b in range(B):
-            if written + len(to_write_blocks) - (1 if written == 0 else 0) >= limit_per_epoch:
+        for b in pick:
+            if written >= limit_per_epoch:
                 break
 
             valid = attention_mask[b].bool()
@@ -57,27 +64,59 @@ class DebugMaskMixin:
             if masked_pos.sum().item() == 0:
                 continue
 
-            ids_before = input_ids_before[b].tolist()
-            ids_after  = input_ids_after[b].tolist()
+            ids0 = input_ids_before[b].tolist()
+            ids1 = input_ids_after[b].tolist()
+            toks0 = [self.tokenizer.convert_ids_to_tokens(int(t)) for t in ids0]
+            toks1 = [self.tokenizer.convert_ids_to_tokens(int(t)) for t in ids1]
 
             try:
-                orig_sent  = self.tokenizer.decode([t for i,t in enumerate(ids_before) if valid[i]], skip_special_tokens=True)
-                after_sent = self.tokenizer.decode([t for i,t in enumerate(ids_after)  if valid[i]], skip_special_tokens=True)
+                orig_sent = self.tokenizer.decode([ids0[i] for i in range(L) if valid[i]], skip_special_tokens=True)
+                after_sent = self.tokenizer.decode([ids1[i] for i in range(L) if valid[i]], skip_special_tokens=True)
             except Exception:
-                orig_sent  = self.tokenizer.decode(ids_before, skip_special_tokens=False)
-                after_sent = self.tokenizer.decode(ids_after,  skip_special_tokens=False)
+                orig_sent = self.tokenizer.decode(ids0, skip_special_tokens=False)
+                after_sent = self.tokenizer.decode(ids1, skip_special_tokens=False)
 
-            pos_idx = torch.nonzero(masked_pos, as_tuple=False).squeeze(-1).tolist()
-            if isinstance(pos_idx, int):
-                pos_idx = [pos_idx]
+            # --- 逐层范数统计 ---
+            layer_lines = []
+            total_mean = None
+            total_sum = None
+            if layer_deltas is not None and layer_indices is not None:
+                # layer_deltas: [nL,B,L]
+                means = []
+                for li, layer_id in enumerate(layer_indices):
+                    d = layer_deltas[li, b]  # [L]
+                    m = float(d[valid].mean().item())
+                    means.append(m)
+                    layer_lines.append(f"  - layer {int(layer_id):02d}: mean_delta={m:.6f}")
+                total_mean = sum(means) / max(1, len(means))
+                total_sum = sum(means)
 
-            diff_lines = []
-            for j in pos_idx:
-                t0 = ids_before[j]
-                t1 = ids_after[j]
-                tok0 = self.tokenizer.convert_ids_to_tokens(int(t0))
-                tok1 = self.tokenizer.convert_ids_to_tokens(int(t1))
-                diff_lines.append(f"(pos={j}) {tok0}  ->  {tok1}")
+            # --- 指标：masked token 的显著性更偏向高/低？ ---
+            metric_lines = []
+            if saliency_norm is not None:
+                s = saliency_norm[b]
+                s_all = float(s[valid].mean().item())
+                s_m = float(s[masked_pos].mean().item())
+                ratio = s_m / (s_all + 1e-6)
+                metric_lines.append(f"  - sal_mean_all={s_all:.6f} | sal_mean_masked={s_m:.6f} | ratio={ratio:.4f}")
+
+                # top-k hit
+                k = min(int(topk_tokens), int(valid.sum().item()))
+                s2 = s.clone()
+                s2[~valid] = -1e9
+                topk = torch.topk(s2, k=k, largest=True).indices
+                hit = float(masked_pos[topk].float().mean().item())
+                metric_lines.append(f"  - top{k}_masked_hit_rate={hit:.4f}")
+
+            # --- 列出 masked 的 token、以及 mask 概率/显著性 ---
+            masked_idx = torch.nonzero(masked_pos, as_tuple=False).squeeze(-1).tolist()
+            if isinstance(masked_idx, int):
+                masked_idx = [masked_idx]
+            token_lines = []
+            for j in masked_idx[:50]:
+                p = float(probability_matrix[b, j].item()) if probability_matrix is not None else -1.0
+                s = float(saliency_norm[b, j].item()) if saliency_norm is not None else -1.0
+                token_lines.append(f"  - pos={j:02d} {toks0[j]} -> {toks1[j]} | p={p:.4f} | sal={s:.4f}")
 
             raw = None
             if raw_texts is not None:
@@ -87,29 +126,30 @@ class DebugMaskMixin:
                     raw = None
 
             block = []
-            block.append("-" * 80)
+            block.append("-" * 90)
             block.append(f"Sample #{b}")
             if raw:
                 block.append(f"RAW : {raw}")
             block.append(f"ORIG: {orig_sent}")
             block.append(f"MASK: {after_sent}")
-            block.append("MASKED TOKENS:")
-            for dl in diff_lines:
-                block.append("  - " + dl)
+
+            if total_mean is not None:
+                block.append(f"NORMS: mean_over_layers={total_mean:.6f} | sum_over_layers={total_sum:.6f}")
+                block.append("LAYER_MEAN_DELTAS:")
+                block.extend(layer_lines)
+
+            if metric_lines:
+                block.append("METRICS:")
+                block.extend(metric_lines)
+
+            block.append("MASKED TOKENS (with prob/saliency):")
+            block.extend(token_lines)
             block.append("")
-            to_write_blocks.append("\n".join(block))
 
-        if to_write_blocks:
+            blocks.append("\n".join(block))
+            written += 1
+
+        if len(blocks) > 0:
             with open(out_path, "a", encoding="utf-8") as f:
-                f.write("\n".join(to_write_blocks) + "\n")
-            added = len(to_write_blocks)
-            if written == 0:
-                added -= 1
-            self._dbg_written_per_epoch[int(epoch)] = written + max(0, added)
-
-        if not hasattr(self, "config_debug_mask_file"):
-            try:
-                if hasattr(self, "tokenizer") and hasattr(self, "__dict__"):
-                    pass
-            except Exception:
-                pass
+                f.write("\n".join(blocks) + "\n")
+            self._dbg_written_per_epoch2[int(epoch)] = written
