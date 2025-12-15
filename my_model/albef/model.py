@@ -171,13 +171,17 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
             saliency_compute_epoch = config.get('saliency_compute_epoch', 6)
             if epoch > saliency_compute_epoch:
                 with torch.no_grad():
-                    saliency = self.compute_cross_modal_saliency(
+                    saliency = self.compute_cross_modal_groundedness(
                         text_ids=text1['input_ids'],
                         attention_mask=text1['attention_mask'],
                         image_embeds=image_embeds,
                         image_atts=image_atts,
-                        layers=config.get('saliency_layers', 3),
+                        saliency_image=saliency_image,  # 用已有的 patch 显著性
+                        layers=int(config.get('saliency_layers', 3)),
+                        use_entropy=bool(config.get("grounded_use_entropy", True)),
+                        use_patch_saliency=bool(config.get("grounded_use_patch_saliency", True)),
                     )
+
                 probability_matrix = self.build_curriculum_mask_probs(
                     saliency=saliency,
                     attention_mask=text1['attention_mask'],
@@ -203,7 +207,7 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
             
 
             # === NEW: 10 epoch 后：随机写日志（mask + 逐层范数） ===
-            debug_epoch = int(config.get('debug_mask_epoch', 10))
+            debug_epoch = int(config.get('debug_mask_epoch', 6))
             if epoch >= debug_epoch and bool(config.get("debug_log_saliency", True)):
                 # 注意：这里用 text1（被 MLM mask 的那份）做 saliency 更直观
                 with torch.no_grad():
@@ -235,7 +239,28 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                     sample_per_step=int(config.get("debug_sample_per_step", 2)),
                     topk_tokens=int(config.get("debug_topk_tokens", 8)),
                     step_prob=float(config.get("debug_step_prob", 0.15)),
+                    write_html=False, write_jsonl=False
                 )
+                self.debug_render_mask_with_norms(
+                    epoch=int(epoch),
+                    step=int(batch.get("global_step", 0)),   # 没有就传 n_iter/全局计数
+                    input_ids_before=ids_before_debug,
+                    input_ids_after=input_ids,
+                    targets=labels,
+                    attention_mask=text1['attention_mask'],
+                    probability_matrix=(probability_matrix if probability_matrix is not None else None),
+                    saliency_norm=saliency,
+                    layer_deltas=layer_deltas,
+                    layer_indices=layer_indices,
+                    raw_texts=batch.get('caption1', None),
+                    out_path=str(config.get("debug_mask_file", "./mask_output2.txt")),
+                    limit_per_epoch=int(config.get("debug_mask_limit_per_epoch", 30)),
+                    sample_per_step=int(config.get("debug_sample_per_step", 2)),
+                    topk_tokens=int(config.get("debug_topk_tokens", 8)),
+                    step_prob=float(config.get("debug_step_prob", 0.15)),
+                    write_html=False, write_jsonl=False
+                )
+                
             if enable_soft_label:
                 with torch.no_grad():
                     # ensure image_embeds_m is available if CL disabled
