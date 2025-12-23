@@ -1,19 +1,11 @@
 import os
-import json
-import html
 import torch
-
 
 class DebugMaskMixin:
     """
-    Debug utility for MLM masking:
-      - TXT: readable report with metrics + per-token lines
-      - HTML: highlighted token visualization (mask + saliency/prob)
-      - JSONL: structured records for later analysis
-
-    Works with:
-      - saliency_norm from groundedness (recommended)
-      - optional layer_deltas (legacy hidden-delta ablation)
+    Pure-text debug for MLM masking:
+      - per-token table: idx, tok_before, tok_after, masked?, p_mask, saliency, ranks
+      - optional summary metrics + top-k lists
     """
 
     # -------------------------
@@ -27,28 +19,20 @@ class DebugMaskMixin:
     def _ensure_dir(self, path: str):
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
+    def _tokenize_ids(self, ids):
+        return [self.tokenizer.convert_ids_to_tokens(int(t)) for t in ids]
+
     def _safe_decode(self, ids, valid_mask=None):
-        # ids: list[int]
         try:
             if valid_mask is not None:
                 ids2 = [ids[i] for i in range(len(ids)) if bool(valid_mask[i])]
                 return self.tokenizer.decode(ids2, skip_special_tokens=True)
             return self.tokenizer.decode(ids, skip_special_tokens=False)
         except Exception:
-            # fallback
             try:
                 return " ".join([self.tokenizer.convert_ids_to_tokens(int(t)) for t in ids])
             except Exception:
                 return str(ids)
-
-    def _ascii_bar(self, x: float, width: int = 18) -> str:
-        # x in [0,1]
-        x = float(max(0.0, min(1.0, x)))
-        n = int(round(x * width))
-        return "[" + ("#" * n) + ("." * (width - n)) + "]"
-
-    def _tokenize_ids(self, ids):
-        return [self.tokenizer.convert_ids_to_tokens(int(t)) for t in ids]
 
     def _maybe_get_scalar(self, mat, b, j, default=-1.0):
         if mat is None:
@@ -58,44 +42,40 @@ class DebugMaskMixin:
         except Exception:
             return float(default)
 
-    def _get_epoch_paths(self, out_path: str, epoch: int):
-        # keep your original out_path as TXT (append)
-        txt_path = out_path
-        base, ext = os.path.splitext(out_path)
-        if ext.lower() != ".txt":
-            base = out_path
-        html_path = f"{base}_e{int(epoch):03d}.html"
-        jsonl_path = f"{base}_e{int(epoch):03d}.jsonl"
-        return txt_path, html_path, jsonl_path
+    def _ascii_bar(self, x: float, width: int = 16) -> str:
+        x = float(max(0.0, min(1.0, x)))
+        n = int(round(x * width))
+        return "[" + ("#" * n) + ("." * (width - n)) + "]"
 
-    def _html_header(self):
-        return """<!doctype html>
-<html><head><meta charset="utf-8">
-<style>
-body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; padding: 14px; }
-.block { border: 1px solid #ddd; border-radius: 10px; padding: 12px; margin: 12px 0; }
-.meta { color: #333; font-size: 13px; margin-bottom: 8px; white-space: pre-wrap; }
-.sent { font-size: 14px; line-height: 1.7; white-space: pre-wrap; }
-.tok { padding: 2px 4px; border-radius: 6px; margin: 1px 1px; display: inline-block; }
-.masked { outline: 2px solid rgba(220, 0, 0, 0.55); }
-.small { color: #666; font-size: 12px; }
-hr { border: none; border-top: 1px solid #eee; margin: 10px 0; }
-</style></head><body>
-"""
+    def _clip(self, s: str, n: int = 18) -> str:
+        s = str(s)
+        return s if len(s) <= n else (s[: n - 1] + "…")
 
-    def _html_token_span(self, tok: str, sal: float, prob: float, masked: bool):
-        # sal/prob in [0,1] (or -1)
-        sal = 0.0 if sal < 0 else max(0.0, min(1.0, float(sal)))
-        # background alpha from saliency; keep color neutral-ish
-        alpha = 0.10 + 0.70 * sal
-        bg = f"rgba(30, 144, 255, {alpha:.3f})"  # blue-ish
-        cls = "tok masked" if masked else "tok"
-        title = f"sal={sal:.4f} | p={float(prob):.4f}"
-        safe_tok = html.escape(tok)
-        return f'<span class="{cls}" style="background:{bg}" title="{html.escape(title)}">{safe_tok}</span>'
+    def _compute_rank_map(self, scores: torch.Tensor, valid: torch.Tensor, descending: bool = True):
+        """
+        scores: [L] float
+        valid : [L] bool
+        returns: rank_map [L] int (1..n_valid), invalid -> 0
+        """
+        L = scores.numel()
+        rank_map = torch.zeros(L, dtype=torch.long, device=scores.device)
+        if int(valid.sum().item()) == 0:
+            return rank_map
+
+        s = scores.clone()
+        s[~valid] = -1e9 if descending else 1e9
+        order = torch.argsort(s, descending=descending)  # valid tokens will float to front
+        # assign ranks only to valid
+        r = 1
+        for idx in order.tolist():
+            if not bool(valid[idx]):
+                continue
+            rank_map[idx] = r
+            r += 1
+        return rank_map
 
     # -------------------------
-    # main entry
+    # main entry (same name for compatibility)
     # -------------------------
     @torch.no_grad()
     def debug_render_mask_with_norms(
@@ -109,58 +89,49 @@ hr { border: none; border-top: 1px solid #eee; margin: 10px 0; }
         attention_mask: torch.Tensor,     # [B,L]
         probability_matrix: torch.Tensor = None,  # [B,L]
         saliency_norm: torch.Tensor = None,       # [B,L]
-        layer_deltas: torch.Tensor = None,        # [nL,B,L] optional legacy
-        layer_indices=None,                       # list[int] optional legacy
+        layer_deltas: torch.Tensor = None,        # [nL,B,L] optional
+        layer_indices=None,                       # list[int] optional
         raw_texts=None,
         out_path: str = "./mask_output.txt",
         limit_per_epoch: int = 30,
         sample_per_step: int = 2,
         topk_tokens: int = 8,
         step_prob: float = 0.15,
-        # NEW options (all safe defaults)
-        write_html: bool = True,
-        write_jsonl: bool = True,
-        max_tokens_per_sample: int = 120,
-        max_masked_list: int = 60,
+        # text-only options
+        max_tokens_per_sample: int = 160,
+        show_all_tokens: bool = True,      # ✅ 你要“每个词”，就开这个
+        only_show_maskable: bool = False,  # 可选：只看可被 mask 的位置
+        max_table_rows: int = 260,         # 防止太长
     ):
-        # DDP: only rank0
         if not self._is_rank0():
             return
 
-        # sample trigger (reduce IO)
-        if step_prob < 1.0:
-            if torch.rand(1).item() > float(step_prob):
-                return
+        # reduce IO
+        if step_prob < 1.0 and torch.rand(1).item() > float(step_prob):
+            return
 
-        # per-epoch quota
-        if not hasattr(self, "_dbg_written_per_epoch_v2"):
-            self._dbg_written_per_epoch_v2 = {}
-        written = int(self._dbg_written_per_epoch_v2.get(int(epoch), 0))
+        if not hasattr(self, "_dbg_written_per_epoch_text"):
+            self._dbg_written_per_epoch_text = {}
+        written = int(self._dbg_written_per_epoch_text.get(int(epoch), 0))
         if written >= int(limit_per_epoch):
             return
 
-        txt_path, html_path, jsonl_path = self._get_epoch_paths(out_path, epoch)
-        self._ensure_dir(txt_path)
-        self._ensure_dir(html_path)
-        self._ensure_dir(jsonl_path)
-
-        # init html file if needed
-        if write_html and (not os.path.exists(html_path)):
-            with open(html_path, "w", encoding="utf-8") as f:
-                f.write(self._html_header())
-                f.write(f"<div class='small'>Epoch {int(epoch)} debug file (append during training). You can refresh the page.</div>\n<hr/>\n")
+        self._ensure_dir(out_path)
 
         B, L = input_ids_before.shape
-
-        # choose samples
         perm = torch.randperm(B, device=input_ids_before.device)
         pick = perm[: min(int(sample_per_step), B)].tolist()
 
-        # TXT header per first write in epoch
-        blocks_txt = []
+        blocks = []
         if written == 0:
-            sep = "=" * 110
-            blocks_txt.append(f"\n{sep}\n[Epoch {int(epoch)}] Mask Debug (groundedness-ready)\n{sep}\n")
+            sep = "=" * 120
+            blocks.append(f"\n{sep}\n[Epoch {int(epoch)}] Mask Debug (TEXT-ONLY, per-token p_mask + saliency)\n{sep}\n")
+
+        # special ids
+        pad_id = getattr(self.tokenizer, "pad_token_id", None)
+        cls_id = getattr(self.tokenizer, "cls_token_id", None)
+        sep_id = getattr(self.tokenizer, "sep_token_id", None)
+        special_ids = set([x for x in [pad_id, cls_id, sep_id] if x is not None])
 
         for b in pick:
             if written >= int(limit_per_epoch):
@@ -168,9 +139,18 @@ hr { border: none; border-top: 1px solid #eee; margin: 10px 0; }
 
             valid = attention_mask[b].bool()
             masked_pos = (targets[b] != -100) & valid
+
+            # "maskable" (与 build_curriculum_mask_probs 对齐)
+            maskable = valid.clone()
+            if special_ids:
+                for sid in special_ids:
+                    maskable &= (input_ids_before[b] != int(sid))
+
             n_valid = int(valid.sum().item())
             n_masked = int(masked_pos.sum().item())
-            if n_masked == 0:
+            if n_valid == 0:
+                continue
+            if n_masked == 0 and not show_all_tokens:
                 continue
 
             ids0 = input_ids_before[b].tolist()
@@ -178,18 +158,17 @@ hr { border: none; border-top: 1px solid #eee; margin: 10px 0; }
             toks0 = self._tokenize_ids(ids0)
             toks1 = self._tokenize_ids(ids1)
 
-            # truncate for readability
+            # truncate but keep last masked
             show_L = min(int(max_tokens_per_sample), L)
-            # make sure we keep masked positions if truncating
-            # if masked exists beyond show_L, bump show_L
-            if show_L < L:
+            if show_L < L and n_masked > 0:
                 last_mask = int(torch.nonzero(masked_pos, as_tuple=False).max().item())
                 show_L = min(L, max(show_L, last_mask + 1))
 
-            toks0_show = toks0[:show_L]
-            toks1_show = toks1[:show_L]
+            toks0 = toks0[:show_L]
+            toks1 = toks1[:show_L]
             valid_show = valid[:show_L]
             masked_show = masked_pos[:show_L]
+            maskable_show = maskable[:show_L]
 
             orig_sent = self._safe_decode(ids0[:show_L], valid_mask=valid_show)
             after_sent = self._safe_decode(ids1[:show_L], valid_mask=valid_show)
@@ -201,112 +180,127 @@ hr { border: none; border-top: 1px solid #eee; margin: 10px 0; }
                 except Exception:
                     raw = None
 
-            # ---- metrics
+            # ranks
+            sal_b = (saliency_norm[b, :show_L].float() if saliency_norm is not None
+                     else torch.zeros(show_L, device=input_ids_before.device, dtype=torch.float32))
+            prob_b = (probability_matrix[b, :show_L].float() if probability_matrix is not None
+                      else torch.zeros(show_L, device=input_ids_before.device, dtype=torch.float32))
+
+            rank_sal = self._compute_rank_map(sal_b, valid_show, descending=True)
+            rank_prob = self._compute_rank_map(prob_b, maskable_show, descending=True)
+
+            # summary metrics
             metric_lines = []
             if saliency_norm is not None:
-                s = saliency_norm[b]
-                s_all = float(s[valid].mean().item()) if n_valid > 0 else 0.0
-                s_m = float(s[masked_pos].mean().item()) if n_masked > 0 else 0.0
+                s_all = float(sal_b[valid_show].mean().item()) if n_valid > 0 else 0.0
+                s_m = float(sal_b[masked_show].mean().item()) if int(masked_show.sum().item()) > 0 else 0.0
                 ratio = s_m / (s_all + 1e-6)
                 metric_lines.append(f"  - sal_mean_all={s_all:.6f} | sal_mean_masked={s_m:.6f} | ratio={ratio:.4f}")
 
-                k = min(int(topk_tokens), max(1, n_valid))
-                s2 = s.clone()
-                s2[~valid] = -1e9
-                topk = torch.topk(s2, k=k, largest=True).indices
-                hit = float(masked_pos[topk].float().mean().item())
-                metric_lines.append(f"  - top{k}_masked_hit_rate={hit:.4f}")
+                k = min(int(topk_tokens), max(1, int(valid_show.sum().item())))
+                s2 = sal_b.clone()
+                s2[~valid_show] = -1e9
+                topk_idx = torch.topk(s2, k=k, largest=True).indices
+                hit = float(masked_show[topk_idx].float().mean().item())
+                metric_lines.append(f"  - top{k}_sal_masked_hit_rate={hit:.4f}")
 
-                # extra: correlation-ish proxy (masked above median?)
-                med = float(s[valid].median().item()) if n_valid > 0 else 0.0
-                high_mask_rate = float((masked_pos & (s >= med)).float().sum().item() / max(1, n_masked))
-                metric_lines.append(f"  - masked_in_sal>=median_rate={high_mask_rate:.4f}")
+            if probability_matrix is not None:
+                p_all = float(prob_b[maskable_show].mean().item()) if int(maskable_show.sum().item()) > 0 else 0.0
+                p_m = float(prob_b[masked_show & maskable_show].mean().item()) if int((masked_show & maskable_show).sum().item()) > 0 else 0.0
+                metric_lines.append(f"  - p_mask_mean_maskable={p_all:.6f} | p_mask_mean_masked={p_m:.6f}")
 
-            # stopword hit rate (if you added mlm_stopword_ids)
-            stop_ids = getattr(self, "mlm_stopword_ids", None)
-            if stop_ids:
-                is_stop = torch.zeros_like(input_ids_before[b], dtype=torch.bool)
-                for sid in stop_ids:
-                    is_stop |= (input_ids_before[b] == int(sid))
-                sw_hit = float((masked_pos & is_stop).float().sum().item() / max(1, n_masked))
-                metric_lines.append(f"  - masked_stopword_rate={sw_hit:.4f}")
-
-            # legacy layer delta stats (optional)
+            # legacy layer delta (optional)
             layer_lines = []
             if (layer_deltas is not None) and (layer_indices is not None):
                 means = []
                 for li, layer_id in enumerate(layer_indices):
-                    d = layer_deltas[li, b]  # [L]
-                    m = float(d[valid].mean().item()) if n_valid > 0 else 0.0
+                    d = layer_deltas[li, b, :show_L].float()
+                    m = float(d[valid_show].mean().item()) if int(valid_show.sum().item()) > 0 else 0.0
                     means.append(m)
                     layer_lines.append(f"  - layer {int(layer_id):02d}: mean_delta={m:.6f}")
-                total_mean = sum(means) / max(1, len(means))
-                total_sum = sum(means)
-                layer_lines.insert(0, f"  - mean_over_layers={total_mean:.6f} | sum_over_layers={total_sum:.6f}")
+                if means:
+                    layer_lines.insert(0, f"  - mean_over_layers={sum(means)/len(means):.6f}")
 
-            # ---- masked token list
-            masked_idx = torch.nonzero(masked_pos, as_tuple=False).squeeze(-1).tolist()
-            if isinstance(masked_idx, int):
-                masked_idx = [masked_idx]
-            masked_idx = masked_idx[: int(max_masked_list)]
+            # build per-token table
+            header = (
+                "IDX  M  MASKABLE  TOK_BEFORE           -> TOK_AFTER            | p_mask    | sal      | rank_sal | rank_p"
+            )
+            table = [header, "-" * len(header)]
 
-            token_lines = []
-            for j in masked_idx:
-                p = self._maybe_get_scalar(probability_matrix, b, j, default=-1.0)
-                s = self._maybe_get_scalar(saliency_norm, b, j, default=-1.0)
-                bar = self._ascii_bar(s if s >= 0 else 0.0)
-                token_lines.append(
-                    f"  - pos={int(j):03d} {toks0[j]} -> {toks1[j]} | p={p:.4f} | sal={s:.4f} {bar}"
+            rows = 0
+            for j in range(show_L):
+                if not bool(valid_show[j]):
+                    continue
+                if only_show_maskable and not bool(maskable_show[j]):
+                    continue
+                if (not show_all_tokens) and (not bool(masked_show[j])):
+                    continue
+
+                mflag = "*" if bool(masked_show[j]) else " "
+                mkable = "Y" if bool(maskable_show[j]) else "N"
+
+                p = float(prob_b[j].item()) if probability_matrix is not None else -1.0
+                s = float(sal_b[j].item()) if saliency_norm is not None else -1.0
+                bar = self._ascii_bar(s if s >= 0 else 0.0, width=12)
+
+                rs = int(rank_sal[j].item())
+                rp = int(rank_prob[j].item())
+
+                table.append(
+                    f"{j:03d}  {mflag}    {mkable}     "
+                    f"{self._clip(toks0[j], 18):<18} -> {self._clip(toks1[j], 18):<18} | "
+                    f"{p:8.4f} | {s:7.4f} {bar} | "
+                    f"{rs:7d} | {rp:6d}"
                 )
+                rows += 1
+                if rows >= int(max_table_rows):
+                    table.append(f"... (table truncated at {max_table_rows} rows)")
+                    break
 
-            # ---- TXT block
+            # top-k lists (quick scan)
+            topk_txt = []
+            if saliency_norm is not None:
+                k = min(int(topk_tokens), max(1, int(valid_show.sum().item())))
+                s2 = sal_b.clone()
+                s2[~valid_show] = -1e9
+                idx = torch.topk(s2, k=k, largest=True).indices.tolist()
+                topk_txt.append("TOP-SAL: " + ", ".join([f"{i}:{toks0[i]}(sal={float(sal_b[i]):.3f},p={float(prob_b[i]):.3f})" for i in idx]))
+            if probability_matrix is not None:
+                k = min(int(topk_tokens), max(1, int(maskable_show.sum().item())))
+                p2 = prob_b.clone()
+                p2[~maskable_show] = -1e9
+                idx = torch.topk(p2, k=k, largest=True).indices.tolist()
+                topk_txt.append("TOP-P  : " + ", ".join([f"{i}:{toks0[i]}(p={float(prob_b[i]):.3f},sal={float(sal_b[i]):.3f})" for i in idx]))
+
+            # block write
             bt = []
-            bt.append("-" * 100)
-            bt.append(f"Sample #{int(b)} | valid={n_valid} | masked={n_masked} ({n_masked/max(1,n_valid):.3f}) | step={int(step)}")
+            bt.append("-" * 120)
+            bt.append(f"Sample #{int(b)} | step={int(step)} | valid={n_valid} | maskable={int(maskable.sum().item())} | masked={n_masked} ({n_masked/max(1,n_valid):.3f})")
             if raw:
                 bt.append(f"RAW : {raw}")
             bt.append(f"ORIG: {orig_sent}")
             bt.append(f"MASK: {after_sent}")
 
             if layer_lines:
-                bt.append("NORMS (legacy hidden-delta):")
+                bt.append("LAYER-DELTA (legacy):")
                 bt.extend(layer_lines)
 
             if metric_lines:
                 bt.append("METRICS:")
                 bt.extend(metric_lines)
 
-            bt.append("MASKED TOKENS (pos / before->after / prob / saliency):")
-            bt.extend(token_lines)
-            bt.append("")
-            blocks_txt.append("\n".join(bt))
+            if topk_txt:
+                bt.append("QUICKSCAN:")
+                bt.extend(["  - " + x for x in topk_txt])
 
-            # ---- JSONL record
-            if write_jsonl:
-                rec = {
-                    "epoch": int(epoch),
-                    "step": int(step),
-                    "sample": int(b),
-                    "n_valid": int(n_valid),
-                    "n_masked": int(n_masked),
-                    "orig": orig_sent,
-                    "masked": after_sent,
-                    "raw": raw,
-                    "masked_positions": [int(j) for j in masked_idx],
-                    "masked_tokens_before": [toks0[int(j)] for j in masked_idx],
-                    "masked_tokens_after": [toks1[int(j)] for j in masked_idx],
-                }
-                if saliency_norm is not None:
-                    rec["saliency_masked"] = [self._maybe_get_scalar(saliency_norm, b, int(j)) for j in masked_idx]
-                if probability_matrix is not None:
-                    rec["prob_masked"] = [self._maybe_get_scalar(probability_matrix, b, int(j)) for j in masked_idx]
-                with open(jsonl_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            bt.append("TOKENS (per-token p_mask + saliency; '*' means actually masked this step):")
+            bt.extend(table)
+            bt.append("")
+            blocks.append("\n".join(bt))
 
             written += 1
 
-        # write TXT (append)
-        if len(blocks_txt) > 0:
-            with open(txt_path, "a", encoding="utf-8") as f:
-                f.write("\n".join(blocks_txt) + "\n")
-            self._dbg_written_per_epoch_v2[int(epoch)] = int(written)
+        if blocks:
+            with open(out_path, "a", encoding="utf-8") as f:
+                f.write("\n".join(blocks) + "\n")
+            self._dbg_written_per_epoch_text[int(epoch)] = int(written)

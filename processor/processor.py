@@ -18,7 +18,8 @@ from scheduler import create_scheduler
 from .weights import compute_dynamic_weights
 from .pseudo import generate_and_broadcast_pseudo_labels
 from .eval_hooks import evaluate_and_checkpoint
-
+from io import StringIO
+import pprint
 
 def _setup_optim_sched(config: Dict[str, Any], model):
     arg_opt = utils.AttrDict(config['optimizer'])
@@ -51,7 +52,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
     if is_main:
         tb_writer = SummaryWriter(log_dir=os.path.join(args.output_dir, 'tensorboard'), flush_secs=60)
     # 写入频率（默认每 20 步；也可通过 args.tb_every 覆盖）
-    tb_every = getattr(args, "tb_every", 20)
+    tb_every = getattr(args, "tb_every", 50)
     if is_main:
         logger.info(f"TensorBoard scalars will be logged every {tb_every} steps")
 
@@ -86,10 +87,31 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
     best_log = {}
 
     for epoch in range(start_epoch, num_epoch + 1):
-        
+        # ====== 第七个 epoch dump args + config 到日志 ======
+        dump_epoch_1based = 7
+        target_epoch = start_epoch + dump_epoch_1based - 1  # start_epoch=0 -> target_epoch=6
+
+        if is_main and epoch == target_epoch:
+            logger.info("========== [Dump args & config @ epoch=%d] ==========", epoch)
+
+            # args
+            try:
+                logger.info("args (vars):\n%s", pprint.pformat(vars(args), width=120, sort_dicts=False))
+            except Exception:
+                logger.info("args:\n%s", str(args))
+
+            # config（按 YAML 格式输出更直观）
+            try:
+                buf = StringIO()
+                yaml.dump(config, buf)
+                logger.info("config (yaml):\n%s", buf.getvalue())
+            except Exception:
+                logger.info("config (repr):\n%s", pprint.pformat(config, width=120))
+
+            logger.info("========== [End dump] ==========")
+        # =======================================================
         if epoch<5 or epoch%2==1:
         # ========== 1) 伪标签：生成 & 广播 & 应用 ==========
-        # 仅在较早阶段进行聚类（与旧逻辑一致：epoch < 40）
             image_pseudo_labels = generate_and_broadcast_pseudo_labels(
                 epoch=epoch,
                 device=device,
@@ -108,9 +130,6 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
 
             # 训练数据集应用伪标签 & 可选重置队列
             train_loader.dataset.mode = 'train'
-            swap_epoch = getattr(args, "swap_epoch", 99)  # 不启用伪标签随机交换
-            if epoch > swap_epoch:
-                train_loader.dataset.set_augment_policy('pseudo')
             train_loader.dataset.set_pseudo_labels(image_pseudo_labels.cpu())
 
             if bool(config.get('reset_queue_each_epoch', True)):

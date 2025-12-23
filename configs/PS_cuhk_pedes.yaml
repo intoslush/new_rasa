@@ -44,3 +44,16 @@ weights_schedule:
   loss_itm:
     min: 0.2 
     max: 1.5          
+
+reset_queue_each_epoch: False  #每个epoch是否重置队列
+enable_cl_loss: True
+
+enable_mlm_loss: False
+mlm_soft_label: False
+debug_log_saliency: False  #用来输出可视化的mask词
+
+
+enable_itm_loss: False
+enable_itm_consistency: False
+
+enable_infmask_loss: False

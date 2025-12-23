@@ -32,11 +32,7 @@ def compute_dynamic_weights(
         schedule = {}
 
     freeze = int(schedule.get("freeze_epochs", 20))
-    # —— 保持与旧代码一致的行为（如需启用配置，请注释/删除下一行）——
-    freeze = 99#目前不启用
-
     mode = schedule.get("mode", "linear")
-
     # 冻结阶段：直接返回初始权重
     if epoch <= freeze:
         return dict(base_weights)
