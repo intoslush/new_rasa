@@ -134,24 +134,46 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
         
         # ===== Contrastive loss =====
         enable_cl_loss = bool(config.get('enable_cl_loss', True))
+        use_momentum   = bool(config.get('use_momentum', True))   # <-- 新增：控制是否用动量模型
+
         if enable_cl_loss:
             idx = idx.view(-1, 1)
             idx_all = torch.cat([idx.t(), self.idx_queue.clone().detach()], dim=1)
             pos_idx = torch.eq(idx, idx_all).float()
             sim_targets = pos_idx / pos_idx.sum(1, keepdim=True)
-            with torch.no_grad():
-                self._momentum_update()
-                image_embeds_m = self.visual_encoder_m(image2)
-                image_feat_m = F.normalize(self.vision_proj_m(image_embeds_m[:, 0, :]), dim=-1)
-                image_feat_all = torch.cat([image_feat_m.t(), self.image_queue.clone().detach()], dim=1)
 
-                text_output_m = self.text_encoder_m.bert(text2['input_ids'], attention_mask=text2['attention_mask'], return_dict=True, mode='text')
-                text_feat_m = F.normalize(self.text_proj_m(text_output_m.last_hidden_state[:, 0, :]), dim=-1)
-                text_feat_all = torch.cat([text_feat_m.t(), self.text_queue.clone().detach()], dim=1)
-                sim_i2t_m = image_feat_m @ text_feat_all / self.temp
-                sim_t2i_m = text_feat_m @ image_feat_all / self.temp
-                sim_i2t_targets = alpha * F.softmax(sim_i2t_m, dim=1) + (1 - alpha) * sim_targets
-                sim_t2i_targets = alpha * F.softmax(sim_t2i_m, dim=1) + (1 - alpha) * sim_targets
+            with torch.no_grad():
+                if use_momentum:
+                    # ---- 动量分支：和你原来一致 ----
+                    self._momentum_update()
+
+                    image_embeds_m = self.visual_encoder_m(image2)
+                    image_feat_m = F.normalize(self.vision_proj_m(image_embeds_m[:, 0, :]), dim=-1)
+                    image_feat_all = torch.cat([image_feat_m.t(), self.image_queue.clone().detach()], dim=1)
+
+                    text_output_m = self.text_encoder_m.bert(
+                        text2['input_ids'],
+                        attention_mask=text2['attention_mask'],
+                        return_dict=True,
+                        mode='text'
+                    )
+                    text_feat_m = F.normalize(self.text_proj_m(text_output_m.last_hidden_state[:, 0, :]), dim=-1)
+                    text_feat_all = torch.cat([text_feat_m.t(), self.text_queue.clone().detach()], dim=1)
+
+                    sim_i2t_m = image_feat_m @ text_feat_all / self.temp
+                    sim_t2i_m = text_feat_m @ image_feat_all / self.temp
+                    sim_i2t_targets = alpha * F.softmax(sim_i2t_m, dim=1) + (1 - alpha) * sim_targets
+                    sim_t2i_targets = alpha * F.softmax(sim_t2i_m, dim=1) + (1 - alpha) * sim_targets
+
+                else:
+                    # ---- 非动量分支：用当前特征( detach )做 soft target + 队列对比 ----
+                    image_feat_all = torch.cat([image_feat.detach().t(), self.image_queue.clone().detach()], dim=1)
+                    text_feat_all  = torch.cat([text_feat.detach().t(),  self.text_queue.clone().detach()], dim=1)
+
+                    sim_i2t_c = image_feat.detach() @ text_feat_all / self.temp
+                    sim_t2i_c = text_feat.detach()  @ image_feat_all / self.temp
+                    sim_i2t_targets = sim_targets  # alpha * F.softmax(sim_i2t_c, dim=1) + (1 - alpha) * sim_targets
+                    sim_t2i_targets = sim_targets  #alpha * F.softmax(sim_t2i_c, dim=1) + (1 - alpha) * sim_targets
 
             sim_i2t = image_feat @ text_feat_all / self.temp
             sim_t2i = text_feat @ image_feat_all / self.temp
@@ -160,7 +182,12 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
             loss_t2i = -torch.sum(F.log_softmax(sim_t2i, dim=1) * sim_t2i_targets, dim=1).mean()
             loss_dict['loss_cl'] = (loss_i2t + loss_t2i) / 2
 
-            self._dequeue_and_enqueue(image_feat_m, text_feat_m, idx)
+            # 队列更新：动量用 m 特征；非动量用当前特征（detach）
+            if use_momentum:
+                self._dequeue_and_enqueue(image_feat_m, text_feat_m, idx)
+            else:
+                self._dequeue_and_enqueue(image_feat.detach(), text_feat.detach(), idx)
+
         
         # ===== Saliency compute =====
         probability_matrix = None 
