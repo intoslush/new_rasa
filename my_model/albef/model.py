@@ -30,11 +30,12 @@ from .mixins import (
     SaliencyMixin,
     DebugMaskMixin,
     concat_all_gather,
+    SoftMaskITMMixin,
 )
 from .mixins.infmask import InfMaskMixin
 
 
-class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMixin, DebugMaskMixin, InfMaskMixin, nn.Module):
+class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMixin, DebugMaskMixin, InfMaskMixin,SoftMaskITMMixin, nn.Module):
     def __init__(self, text_encoder=None, tokenizer=None, config: Dict[str, Any] = None):
         super().__init__()
         if config is None:
@@ -325,6 +326,7 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
 
         # ===== ITM (matched/unmatched) =====
         enable_itm_loss = bool(config.get('enable_itm_loss', False))
+        enable_itm_softmask = bool(config.get('enable_itm_softmask', False))
         if enable_itm_loss:
             # --- 学生：正样本 (text2, image1) ---
             output_pos = self.text_encoder.bert(
@@ -334,6 +336,8 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                 encoder_attention_mask=image_atts,
                 return_dict=True,
                 mode='fusion',
+                output_attentions=enable_itm_softmask,  # 只有 softmask 才开
+                output_hidden_states=False,
             )
 
             # --- 学生：相似度采负样本（保持原逻辑） ---
@@ -401,6 +405,27 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
             )
             vl_output_pos_full = None
             
+        # ===== SoftMask ITM (positive-only extra branch) =====
+        if enable_itm_softmask:
+            # 一些超参
+            sm_weight = float(config.get('itm_softmask_weight', 1.0))
+            sm_beta   = float(config.get('itm_softmask_beta', 0.4))      # groundedness 引导强度
+            sm_layers = int(config.get('itm_softmask_gcam_layers', 3))   # gcam聚合最后几层
+
+            # 计算 softmask loss（只用正样本）
+            loss_itm_sm = self.compute_itm_softmask_loss(
+                text_embeds=text_embeds,                 # [B,Lt,D]
+                text_atts=text_atts,
+                text_ids=text2['input_ids'],
+                image_embeds=image_embeds,               # [B,Lv,D]
+                image_atts=image_atts,
+                output_pos=output_pos,                   # 含 cross_attentions
+                itm_head=self.itm_head,
+                gcam_layers=sm_layers,
+                beta=sm_beta,
+                weight=sm_weight,
+            )
+            loss_dict['loss_itm_softmask'] = loss_itm_sm
 
         # ===== ITM consistency：masked 视图与 full 视图对齐 =====
         enable_itm_cons = bool(config.get('enable_itm_consistency', False))

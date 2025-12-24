@@ -56,5 +56,6 @@ debug_log_saliency: False  #用来输出可视化的mask词
 
 enable_itm_loss: False
 enable_itm_consistency: False
+enable_itm_softmask: False
 
 enable_infmask_loss: False
