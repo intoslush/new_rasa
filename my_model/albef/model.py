@@ -32,8 +32,10 @@ from .mixins import (
     concat_all_gather,
 )
 from .mixins.infmask import InfMaskMixin
-
-
+from .attr_supervision import build_keep_token_ids, make_id2col
+from .attr_supervision import build_attr_targets, soft_ce_loss
+from .attr_supervision import build_keep_token_ids_from_df, make_id2col
+from .attr_supervision import build_token_targets, soft_ce_loss
 class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMixin, DebugMaskMixin, InfMaskMixin, nn.Module):
     def __init__(self, text_encoder=None, tokenizer=None, config: Dict[str, Any] = None):
         super().__init__()
@@ -90,6 +92,40 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
         self.infmask_head = nn.Linear(self.text_width, d_inf, bias=False)
         self.infmask_ln   = nn.LayerNorm(d_inf)
         self.infmask_temp = nn.Parameter(torch.tensor(float(config.get('infmask_temp', 0.07))))
+        
+        # ===== [Attr Token Supervision] =====
+        self.enable_attr_token_loss = bool(config.get("enable_attr_token_loss", False))
+        if self.enable_attr_token_loss:
+            payload = torch.load(config["offline_idf_path"], map_location="cpu")
+            df_full  = payload["df"].to(torch.long)         # [vocab_size]
+            idf_full = payload["idf"].to(torch.float32)     # [vocab_size]
+            vocab_size = int(payload["vocab_size"])
+
+            min_df = int(config.get("token_keep_min_df", 1))
+            # keep_ids = build_keep_token_ids_from_df(self.tokenizer, df_full, min_df=min_df)
+            remove_wp_suffix = bool(config.get("remove_wordpiece_suffix", False))
+            # suffix_list = config.get("wordpiece_suffix_list", None)
+
+            keep_ids = build_keep_token_ids_from_df(
+                tokenizer=self.tokenizer,
+                df=df_full,
+                min_df=min_df,
+                remove_wordpiece_suffix=remove_wp_suffix,
+                )
+
+            if len(keep_ids) == 0:
+                print(f"[TokenLoss] keep_ids empty (min_df={min_df}) -> disable loss")
+                self.enable_attr_token_loss = False
+            else:
+                id2col = make_id2col(vocab_size, keep_ids)
+                idf_keep = idf_full[torch.tensor(keep_ids, dtype=torch.long)]
+
+                self.register_buffer("tok_keep_ids", torch.tensor(keep_ids, dtype=torch.long), persistent=True)
+                self.register_buffer("tok_id2col", id2col, persistent=True)
+                self.register_buffer("tok_idf_keep", idf_keep, persistent=True)
+
+                K = len(keep_ids)
+                self.attr_cls_head = nn.Linear(vision_width, K)  # 头名字你也可以改成 tok_cls_head
 
     def forward(self, batch, alpha, config, epoch):  # text2 是概率同一个 id 的其他图片描述, img1/img2 同一图不同增广
         loss_dict = {}
@@ -187,7 +223,22 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                 self._dequeue_and_enqueue(image_feat_m, text_feat_m, idx)
             else:
                 self._dequeue_and_enqueue(image_feat.detach(), text_feat.detach(), idx)
+                
+        # ===== Attribute Token Supervision =====
+        if getattr(self, "enable_attr_token_loss", False):
+            img_cls = image_embeds[:, 0, :]                  # [B, vision_width]
+            tok_logits = self.attr_cls_head(img_cls)         # [B, K]
 
+            input_ids = text2["input_ids"]
+            attn_mask = text2["attention_mask"]
+
+            targets_norm, non_empty = build_token_targets(
+                input_ids=input_ids,
+                attention_mask=attn_mask,
+                id2col=self.tok_id2col,
+                idf_keep=self.tok_idf_keep,
+            )
+            loss_dict["loss_attr_token"] = soft_ce_loss(tok_logits, targets_norm, non_empty)
         
         # ===== Saliency compute =====
         probability_matrix = None 
@@ -400,102 +451,7 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                 mode='fusion',
             )
             vl_output_pos_full = None
-            
 
-        # ===== ITM consistency：masked 视图与 full 视图对齐 =====
-        enable_itm_cons = bool(config.get('enable_itm_consistency', False))
-        if enable_itm_loss and enable_itm_cons and (vl_output_pos_full is not None):
-            bs = image1.size(0)
-            device = image1.device
-
-            # keep 比例可以单独配，尽量不要太狠
-            keep_t_ratio = float(config.get('itm_cons_keep_t', 0.6))
-            keep_v_ratio = float(config.get('itm_cons_keep_v', 0.6))
-            min_keep_t = int(config.get('itm_cons_min_keep_t', 3))
-            min_keep_v = int(config.get('itm_cons_min_keep_v', 3))
-
-            use_saliency = bool(config.get('infmask_use_saliency', True))
-            sal_text_for_itm = saliency if (use_saliency and 'saliency' in locals()) else None
-            sal_img_for_itm = saliency_image if use_saliency else None
-            saliency_phase = str(config.get('infmask_saliency_phase', 'none'))
-
-            # --- 文本 keep mask（对 text2） ---
-            B, L_t = text2['input_ids'].shape
-            kv_keep_mask = self._infmask_build_keep_mask(
-                B=B,
-                L=L_t,
-                keep_ratio=keep_t_ratio,
-                min_keep=min_keep_t,
-                device=device,
-                must_keep_cls=True,
-                saliency=sal_text_for_itm,
-                saliency_phase=saliency_phase,
-                valid_mask=text_atts.bool(),
-            )
-
-            # --- 图像 keep mask（对 image1 的 token） ---
-            _, L_v, _ = image_embeds.shape
-            q_keep_mask = self._infmask_build_keep_mask(
-                B=B,
-                L=L_v,
-                keep_ratio=keep_v_ratio,
-                min_keep=min_keep_v,
-                device=device,
-                must_keep_cls=True,
-                saliency=sal_img_for_itm,
-                saliency_phase=saliency_phase,
-                valid_mask=image_atts.bool(),
-            )
-
-            # 输入级别 masking
-            text_ids_m, text_atts_m = self._infmask_apply_text_input_mask(
-                text_ids=text2['input_ids'],
-                text_atts=text_atts,
-                keep_mask=kv_keep_mask,
-                mask_token_id=self.tokenizer.mask_token_id,
-            )
-            image_m, image_atts_m = self._infmask_apply_image_input_mask(
-                image=image1,
-                image_embeds=image_embeds,
-                image_atts=image_atts,
-                keep_mask=q_keep_mask,
-            )
-
-            # 重新编码 masked 文本 / 图像
-            text_out_m = self.text_encoder.bert(
-                text_ids_m,
-                attention_mask=text_atts_m,
-                return_dict=True,
-                mode='text',
-            )
-            text_embeds_m = text_out_m.last_hidden_state
-            image_embeds_m = self.visual_encoder(image_m)
-
-            # 融合得到 masked 视图 CLS
-            output_pos_mask = self.text_encoder.bert(
-                encoder_embeds=text_embeds_m,
-                attention_mask=text_atts_m,
-                encoder_hidden_states=image_embeds_m,
-                encoder_attention_mask=image_atts_m,
-                return_dict=True,
-                mode='fusion',
-            )
-            cls_mask = output_pos_mask.last_hidden_state[:, 0, :]
-            logits_mask = self.itm_head(cls_mask)   # [bs, 2]
-
-            # self-teacher：full 视图的正样本 logits，stop-grad
-            T_cons = float(config.get('itm_cons_temp', 1.0))
-            with torch.no_grad():
-                p_t = F.softmax(vl_output_pos_full / T_cons, dim=-1)
-
-            log_p_s = F.log_softmax(logits_mask / T_cons, dim=-1)
-            loss_itm_cons = F.kl_div(log_p_s, p_t, reduction='batchmean') * (T_cons * T_cons)
-            loss_dict['loss_itm_cons'] = loss_itm_cons
-            
-            
-        # ===== InfMasking (synergy) =====
-        enable_infmask = bool(config.get('enable_infmask_loss', False))
-        if enable_infmask:
             # === Teacher（动量塔）作为 full 视图对齐目标 ===
             with torch.no_grad():
                 self._momentum_update()
