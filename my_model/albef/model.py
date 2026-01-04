@@ -216,62 +216,7 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                 p_min=float(config.get('mlm_prob_min', 0.0)),
                 p_max=float(config.get('mlm_prob_max', 0.95)),
             )
-            debug_epoch = int(config.get('debug_mask_epoch', 6))
-            if epoch >= debug_epoch and bool(config.get("debug_log_saliency", True)):
-                # 注意：这里用 text1（被 MLM mask 的那份）做 saliency 更直观
-                with torch.no_grad():
-                    sal_layers = int(config.get("debug_saliency_layers", 3))
-                    #这是使用范数的方案
-                    sal_norm, layer_deltas, layer_indices = self.compute_cross_modal_saliency(
-                        text_ids=text1['input_ids'],
-                        attention_mask=text1['attention_mask'],
-                        image_embeds=image_embeds,
-                        image_atts=image_atts,
-                        layers=sal_layers,
-                        return_layer_deltas=True,
-                    )
-
-                # 你要输出到当前目录 mask_output.txt
-                #范数方案的debug
-                self.debug_render_mask_with_norms(
-                    epoch=int(epoch),
-                    step=int(batch.get("global_step", 0)),   # 没有就传 n_iter/全局计数
-                    input_ids_before=ids_before_debug,
-                    input_ids_after=input_ids,
-                    targets=labels,
-                    attention_mask=text1['attention_mask'],
-                    probability_matrix=(probability_matrix if probability_matrix is not None else None),
-                    saliency_norm=sal_norm,
-                    layer_deltas=layer_deltas,
-                    layer_indices=layer_indices,
-                    raw_texts=batch.get('caption1', None),
-                    out_path=str(config.get("debug_mask_file", "./mask_output.txt")),
-                    limit_per_epoch=int(config.get("debug_mask_limit_per_epoch", 30)),
-                    sample_per_step=int(config.get("debug_sample_per_step", 2)),
-                    topk_tokens=int(config.get("debug_topk_tokens", 8)),
-                    step_prob=float(config.get("debug_step_prob", 0.15)),
-                    write_html=False, write_jsonl=False
-                )
-                # 注意力方案的debug
-                self.debug_render_mask_with_norms(
-                    epoch=int(epoch),
-                    step=int(batch.get("global_step", 0)),   # 没有就传 n_iter/全局计数
-                    input_ids_before=ids_before_debug,
-                    input_ids_after=input_ids,
-                    targets=labels,
-                    attention_mask=text1['attention_mask'],
-                    probability_matrix=(probability_matrix if probability_matrix is not None else None),
-                    saliency_norm=saliency,
-                    layer_deltas=layer_deltas,
-                    layer_indices=layer_indices,
-                    raw_texts=batch.get('caption1', None),
-                    out_path=str(config.get("debug_mask_file", "./mask_output2.txt")),
-                    limit_per_epoch=int(config.get("debug_mask_limit_per_epoch", 30)),
-                    sample_per_step=int(config.get("debug_sample_per_step", 2)),
-                    topk_tokens=int(config.get("debug_topk_tokens", 8)),
-                    step_prob=float(config.get("debug_step_prob", 0.15)),
-                    write_html=False, write_jsonl=False
-                )
+            
                
         else:
             probability_matrix = None
@@ -321,6 +266,60 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                     encoder_attention_mask=image_atts,
                     return_dict=True,
                     labels=labels,
+                )
+            debug_epoch = int(config.get('debug_mask_epoch', 6))
+            if epoch >= debug_epoch and bool(config.get("debug_log_saliency", True)):
+                # 注意：这里用 text1（被 MLM mask 的那份）做 saliency 更直观
+                with torch.no_grad():
+                    sal_layers = int(config.get("debug_saliency_layers", 3))
+                    #这是使用范数的方案
+                    sal_norm, layer_deltas, layer_indices = self.compute_cross_modal_saliency(
+                        text_ids=text1['input_ids'],
+                        attention_mask=text1['attention_mask'],
+                        image_embeds=image_embeds,
+                        image_atts=image_atts,
+                        layers=sal_layers,
+                        return_layer_deltas=True,
+                    )
+
+                # 你要输出到当前目录 mask_output.txt
+                #范数方案的debug
+                self.debug_render_mask_with_norms(
+                    epoch=int(epoch),
+                    step=int(batch.get("global_step", 0)),   # 没有就传 n_iter/全局计数
+                    input_ids_before=ids_before_debug,
+                    input_ids_after=input_ids,
+                    targets=labels,
+                    attention_mask=text1['attention_mask'],
+                    probability_matrix=(probability_matrix if probability_matrix is not None else None),
+                    saliency_norm=sal_norm,
+                    layer_deltas=layer_deltas,
+                    layer_indices=layer_indices,
+                    raw_texts=batch.get('caption1', None),
+                    out_path=str(config.get("debug_mask_file", "./mask_output.txt")),
+                    limit_per_epoch=int(config.get("debug_mask_limit_per_epoch", 30)),
+                    sample_per_step=int(config.get("debug_sample_per_step", 2)),
+                    topk_tokens=int(config.get("debug_topk_tokens", 8)),
+                    step_prob=float(config.get("debug_step_prob", 0.15)),
+                )
+                # 注意力方案的debug
+                self.debug_render_mask_with_norms(
+                    epoch=int(epoch),
+                    step=int(batch.get("global_step", 0)),   # 没有就传 n_iter/全局计数
+                    input_ids_before=ids_before_debug,
+                    input_ids_after=input_ids,
+                    targets=labels,
+                    attention_mask=text1['attention_mask'],
+                    probability_matrix=(probability_matrix if probability_matrix is not None else None),
+                    saliency_norm=saliency,
+                    layer_deltas=layer_deltas,
+                    layer_indices=layer_indices,
+                    raw_texts=batch.get('caption1', None),
+                    out_path=str(config.get("debug_mask_file", "./mask_output2.txt")),
+                    limit_per_epoch=int(config.get("debug_mask_limit_per_epoch", 30)),
+                    sample_per_step=int(config.get("debug_sample_per_step", 2)),
+                    topk_tokens=int(config.get("debug_topk_tokens", 8)),
+                    step_prob=float(config.get("debug_step_prob", 0.15)),
                 )
             loss_dict['loss_mlm'] = mlm_output.loss
 

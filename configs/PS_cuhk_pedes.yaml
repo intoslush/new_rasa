@@ -28,10 +28,10 @@ warm_up: True
 optimizer: {opt: adamW, lr: 1e-5, weight_decay: 0.02, lr_custm: 1e-4}
 schedular: {sched: cosine, lr: 1e-5, epochs: 35, min_lr: 2e-6, decay_rate: 1, warmup_lr: 1e-5, warmup_epochs: 1, cooldown_epochs: 0}
 
-eval_epoch: 7
+eval_epoch: 5
 
 
-weights: {"loss_cl": 0.5, "loss_itm": 1, "loss_mlm": 1, "loss_prd": 0.5, "loss_mrtd": 0.5,"loss_sim": 0.5}
+weights: {"loss_cl": 0.5, "loss_itm": 1, "loss_mlm": 1, "loss_prd": 0.5, "loss_mrtd": 0.5,"loss_sim": 0.5, "loss_itm_softmask": 1}
 # 新增的权重调度配置
 weights_schedule:
   freeze_epochs: 40     # 前 20 个 epoch 不变
@@ -49,13 +49,15 @@ use_momentum_queue: True #是否使用动量
 reset_queue_each_epoch: False  #每个epoch是否重置队列
 enable_cl_loss: True
 
-enable_mlm_loss: False
+enable_mlm_loss: True
+saliency_compute_epoch: 99 #计算saliency的epoch
+debug_mask_epoch: 10  #用来输出可视化的mask词的epoch
 mlm_soft_label: False
 debug_log_saliency: False  #用来输出可视化的mask词
 
 
-enable_itm_loss: False
+enable_itm_loss: True
 enable_itm_consistency: False
-enable_itm_softmask: False
+enable_itm_softmask: True
 
 enable_infmask_loss: False
