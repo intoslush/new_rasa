@@ -62,3 +62,15 @@ enable_itm_consistency: False
 enable_itm_softmask: False
 
 enable_infmask_loss: False
+
+enable_reasoning: true
+reasoning_start_epoch: 6          # 建议等模型稳定
+reason_top_p: 0.3                 # top token 比例
+reason_mask_token: "[MASK]"       # 或者 special id
+reason_use_text: "text2"          # "text1" or "text2"
+reason_kd_weight: 1.0
+reason_rank_weight: 1.0
+reason_rank_margin: 1.0
+reason_teacher_temp: 1.0          # teacher softening，可选
+reason_student_temp: 1.0
+

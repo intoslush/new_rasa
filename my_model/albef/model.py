@@ -434,7 +434,111 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                 mode='fusion',
             )
             vl_output_pos_full = None
-            
+        
+        # ===== Reasoning / Counterfactual ITM =====
+        enable_reasoning = bool(config.get("enable_reasoning", False))
+        reasoning_start_epoch = int(config.get("reasoning_start_epoch", 6))
+
+        if enable_reasoning and epoch >= reasoning_start_epoch:
+            # choose which text to operate on
+            reason_use_text = str(config.get("reason_use_text", "text2"))
+            if reason_use_text == "text1":
+                t = text1
+            else:
+                t = text2
+
+            top_p = float(config.get("reason_top_p", 0.3))
+            mask_token_id = self.tokenizer.mask_token_id
+            if mask_token_id is None:
+                raise ValueError("Tokenizer has no mask_token_id; set reason_mask_token strategy accordingly.")
+
+            # 1) token scores from groundedness (no grad)
+            with torch.no_grad():
+                token_scores = self._compute_token_scores_grounded(
+                    text_ids=t["input_ids"],
+                    attention_mask=t["attention_mask"],
+                    image_embeds=image_embeds,
+                    image_atts=image_atts,
+                    saliency_image=saliency_image,
+                    config=config,
+                )
+
+            # 2) build keep/drop inputs
+            input_keep, input_drop = self._build_keep_drop_inputs(
+                input_ids=t["input_ids"],
+                attention_mask=t["attention_mask"],
+                scores=token_scores,
+                top_p=top_p,
+                mask_token_id=mask_token_id,
+            )
+
+            # 3) teacher probs (momentum fusion + itm_head_m)
+            with torch.no_grad():
+                out_m_keep = self.text_encoder_m.bert(
+                    input_keep,
+                    attention_mask=t["attention_mask"],
+                    encoder_hidden_states=image_embeds,     # image from student is ok; or use image_embeds_m if you want
+                    encoder_attention_mask=image_atts,
+                    return_dict=True,
+                    mode="fusion",
+                )
+                out_m_drop = self.text_encoder_m.bert(
+                    input_drop,
+                    attention_mask=t["attention_mask"],
+                    encoder_hidden_states=image_embeds,
+                    encoder_attention_mask=image_atts,
+                    return_dict=True,
+                    mode="fusion",
+                )
+                logit_m_keep = self.itm_head_m(out_m_keep.last_hidden_state[:, 0, :])  # [B,2]
+                logit_m_drop = self.itm_head_m(out_m_drop.last_hidden_state[:, 0, :])
+
+                teacher_temp = float(config.get("reason_teacher_temp", 1.0))
+                p_m_keep = F.softmax(logit_m_keep / teacher_temp, dim=-1)
+                p_m_drop = F.softmax(logit_m_drop / teacher_temp, dim=-1)
+
+            # 4) student probs (fusion + itm_head)
+            out_s_keep = self.text_encoder.bert(
+                input_keep,
+                attention_mask=t["attention_mask"],
+                encoder_hidden_states=image_embeds,
+                encoder_attention_mask=image_atts,
+                return_dict=True,
+                mode="fusion",
+            )
+            out_s_drop = self.text_encoder.bert(
+                input_drop,
+                attention_mask=t["attention_mask"],
+                encoder_hidden_states=image_embeds,
+                encoder_attention_mask=image_atts,
+                return_dict=True,
+                mode="fusion",
+            )
+            logit_s_keep = self.itm_head(out_s_keep.last_hidden_state[:, 0, :])  # [B,2]
+            logit_s_drop = self.itm_head(out_s_drop.last_hidden_state[:, 0, :])
+
+            student_temp = float(config.get("reason_student_temp", 1.0))
+            logp_s_keep = F.log_softmax(logit_s_keep / student_temp, dim=-1)
+            logp_s_drop = F.log_softmax(logit_s_drop / student_temp, dim=-1)
+
+            # 5) losses: KD + Ranking
+            # KD: KL(teacher || student)  (teacher is target distribution)
+            loss_kd_keep = F.kl_div(logp_s_keep, p_m_keep, reduction="batchmean")
+            loss_kd_drop = F.kl_div(logp_s_drop, p_m_drop, reduction="batchmean")
+            loss_itm_cf_kd = 0.5 * (loss_kd_keep + loss_kd_drop)
+
+            # Ranking: enforce match-logit(keep) > match-logit(drop) + margin
+            # match class assumed index=1 (since your itm_head outputs 2 logits, usually [neg,pos] or [pos,neg])
+            # IMPORTANT: confirm your class order. Default assumes label 1 = matched.
+            match_idx = 1
+            margin = float(config.get("reason_rank_margin", 1.0))
+            diff = logit_s_keep[:, match_idx] - logit_s_drop[:, match_idx]
+            loss_itm_cf_rank = F.relu(margin - diff).mean()
+
+            loss_dict["loss_itm_cf_kd"] = loss_itm_cf_kd
+            loss_dict["loss_itm_cf_rank"] = loss_itm_cf_rank
+
+                
         # ===== SoftMask ITM (positive-only extra branch) =====
         if enable_itm_softmask:
             # 一些超参
@@ -601,3 +705,73 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
             loss_dict['loss_infmask'] = loss_infmask
 
         return loss_dict
+    
+    def _safe_special_token_mask(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Return a boolean mask where True indicates positions that are allowed to be modified.
+        We protect [CLS], [SEP], [PAD].
+        """
+        cls_id = self.tokenizer.cls_token_id
+        sep_id = self.tokenizer.sep_token_id
+        pad_id = self.tokenizer.pad_token_id
+        special = (input_ids == cls_id) | (input_ids == sep_id) | (input_ids == pad_id)
+        return ~special
+
+    @torch.no_grad()
+    def _compute_token_scores_grounded(self, text_ids, attention_mask, image_embeds, image_atts, saliency_image, config):
+        """
+        Use your existing groundedness/saliency to derive per-token scores in [0,1].
+        Output: scores [B, L] (masked positions can still have scores, but will be ignored later)
+        """
+        scores = self.compute_cross_modal_groundedness(
+            text_ids=text_ids,
+            attention_mask=attention_mask,
+            image_embeds=image_embeds,
+            image_atts=image_atts,
+            saliency_image=saliency_image,
+            layers=int(config.get('saliency_layers', 3)),
+            use_entropy=bool(config.get("grounded_use_entropy", True)),
+            use_patch_saliency=bool(config.get("grounded_use_patch_saliency", True)),
+        )
+        # scores shape should be [B, L] (if your function outputs otherwise, adapt here)
+        # normalize to [0,1] per sample
+        B, L = scores.shape
+        min_v = scores.min(dim=1, keepdim=True)[0]
+        max_v = scores.max(dim=1, keepdim=True)[0]
+        scores = (scores - min_v) / (max_v - min_v + 1e-6)
+        return scores
+
+    def _build_keep_drop_inputs(self, input_ids, attention_mask, scores, top_p: float, mask_token_id: int):
+        """
+        Construct keep and drop versions by masking tokens based on top_p scores.
+        keep: keep top tokens, mask others
+        drop: mask top tokens, keep others
+        """
+        B, L = input_ids.shape
+        modifiable = self._safe_special_token_mask(input_ids) & (attention_mask.bool())
+
+        # number of tokens to select per sample (at least 1)
+        lengths = modifiable.sum(dim=1)  # [B]
+        k = torch.clamp((lengths.float() * top_p).long(), min=1)
+
+        input_keep = input_ids.clone()
+        input_drop = input_ids.clone()
+
+        # select top-k indices per sample
+        for b in range(B):
+            idxs = torch.nonzero(modifiable[b], as_tuple=False).squeeze(1)  # candidate positions
+            if idxs.numel() == 0:
+                continue
+            sc = scores[b, idxs]
+            kk = min(int(k[b].item()), idxs.numel())
+            topk = idxs[torch.topk(sc, kk, largest=True).indices]
+
+            # keep: mask non-topk among modifiable
+            mask_keep = modifiable[b].clone()
+            mask_keep[topk] = False   # False means keep original
+            input_keep[b, mask_keep] = mask_token_id
+
+            # drop: mask topk
+            input_drop[b, topk] = mask_token_id
+
+        return input_keep, input_drop
