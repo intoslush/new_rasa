@@ -46,9 +46,10 @@ weights_schedule:
     max: 1.5
 
 use_momentum_queue: True #是否使用动量
-use_queue: False #是否使用队列
+use_queue: True #是否使用队列
 reset_queue_each_epoch: False  #每个epoch是否重置队列
 enable_cl_loss: True
+itm_neg_sampling  : 'random' # 一个参数决定采样方式：'cl' or 'random'，如果关cl需要改为random
 
 enable_mlm_loss:  True
 saliency_compute_epoch: 99 #计算saliency的epoch

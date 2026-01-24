@@ -246,9 +246,7 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                 p_strong=float(config.get('mlm_p_strong', 0.95)),
                 p_min=float(config.get('mlm_prob_min', 0.0)),
                 p_max=float(config.get('mlm_prob_max', 0.95)),
-            )
-            
-               
+            )            
         else:
             probability_matrix = None
         
@@ -369,25 +367,62 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                 output_attentions=enable_itm_softmask,  # 只有 softmask 才开
                 output_hidden_states=False,
             )
-
-            # --- 学生：相似度采负样本（保持原逻辑） ---
             with torch.no_grad():
                 bs = image1.size(0)
-                if not enable_cl_loss:
-                    sim_i2t = image_feat @ text_feat.t()
-                    sim_t2i = text_feat @ image_feat.t()
+                itm_neg_sampling = str(config.get("itm_neg_sampling", "cl")).lower()
+                if itm_neg_sampling not in ("cl", "random"):
+                    raise ValueError(f"config['itm_neg_sampling'] must be 'cl' or 'random', got {itm_neg_sampling}")
 
-                weights_i2t = F.softmax(sim_i2t[:, :bs], dim=1)
-                weights_t2i = F.softmax(sim_t2i[:, :bs], dim=1)
-                mask = torch.eq(idx, idx.T)
-                if idx.shape[0] <= 2:
-                    raise ValueError("Batch size too small, idx.shape[0] = {}".format(idx.shape[0]))
-                weights_i2t.masked_fill_(mask, 0)
-                weights_t2i.masked_fill_(mask, 0)
+                idx_1d = idx.view(-1)  # [B]
+                mask_same = torch.eq(idx_1d.view(bs, 1), idx_1d.view(1, bs))  # [B,B]
 
-            image_neg_idx = torch.multinomial(weights_t2i, 1).flatten()
+                if itm_neg_sampling == "cl":
+                    # 沿用原本：按 CL 相似度分布采样
+                    # 如果 enable_cl_loss=False，你原代码这里会现算 sim；保持不变
+                    if not enable_cl_loss:
+                        sim_i2t = image_feat @ text_feat.t()  # [B,B]
+                        sim_t2i = text_feat @ image_feat.t()  # [B,B]
+
+                    weights_i2t = F.softmax(sim_i2t[:, :bs], dim=1)  # [B,B]
+                    weights_t2i = F.softmax(sim_t2i[:, :bs], dim=1)  # [B,B]
+                    weights_i2t.masked_fill_(mask_same, 0.0)
+                    weights_t2i.masked_fill_(mask_same, 0.0)
+
+                    # 兜底：若某行全 0（极端情况下同 id 太多），退化为随机（排除自身）
+                    if (weights_i2t.sum(dim=1) == 0).any():
+                        w = (~torch.eye(bs, device=image1.device, dtype=torch.bool)).float()
+                        weights_i2t = w / (w.sum(dim=1, keepdim=True) + 1e-12)
+                    else:
+                        weights_i2t = weights_i2t / (weights_i2t.sum(dim=1, keepdim=True) + 1e-12)
+
+                    if (weights_t2i.sum(dim=1) == 0).any():
+                        w = (~torch.eye(bs, device=image1.device, dtype=torch.bool)).float()
+                        weights_t2i = w / (w.sum(dim=1, keepdim=True) + 1e-12)
+                    else:
+                        weights_t2i = weights_t2i / (weights_t2i.sum(dim=1, keepdim=True) + 1e-12)
+
+                    image_neg_idx = torch.multinomial(weights_t2i, 1).squeeze(1)  # [B]
+                    text_neg_idx  = torch.multinomial(weights_i2t, 1).squeeze(1)  # [B]
+
+                else:
+                    # random：均匀随机采样，排除同 id（含自身）
+                    valid = (~mask_same).float()  # [B,B]
+                    row_sum = valid.sum(dim=1, keepdim=True)
+
+                    # 若某行无可选（整批同 id），退化为排除自身
+                    if (row_sum == 0).any():
+                        valid_fallback = (~torch.eye(bs, device=image1.device, dtype=torch.bool)).float()
+                        valid = torch.where(row_sum > 0, valid, valid_fallback)
+                        row_sum = valid.sum(dim=1, keepdim=True)
+
+                    probs = valid / (row_sum + 1e-12)
+
+                    image_neg_idx = torch.multinomial(probs, 1).squeeze(1)  # [B]
+                    text_neg_idx  = torch.multinomial(probs, 1).squeeze(1)  # [B]
+
+
+            
             image_embeds_neg = image_embeds[image_neg_idx]
-            text_neg_idx = torch.multinomial(weights_i2t, 1).flatten()
             text_embeds_neg = text_embeds[text_neg_idx]
             text_atts_neg = text_atts[text_neg_idx]
 
@@ -405,7 +440,6 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                 mode='fusion',
             )
 
-            # CLS 拼接：前 bs 个是正样本
             vl_embeddings = torch.cat([
                 output_pos.last_hidden_state[:, 0, :],              # [bs, D]
                 output_neg_cross.last_hidden_state[:, 0, :],        # [2*bs, D]

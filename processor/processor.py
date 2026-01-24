@@ -125,7 +125,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
                 logger=logger,
                 tb_writer=tb_writer,
                 enable_nmi_ari=True,
-                cluster_until_epoch=40,
+                cluster_until_epoch=50,
             )
 
             # 训练数据集应用伪标签 & 可选重置队列
