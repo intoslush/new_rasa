@@ -55,7 +55,7 @@ enable_mlm_loss:  True
 saliency_compute_epoch: 10 #计算saliency的epoch
 debug_mask_epoch: 10  #用来输出可视化的mask词的epoch
 mlm_soft_label: False
-debug_log_saliency: False  #用来输出可视化的mask词
+debug_log_saliency: True  #用来输出可视化的mask词
 
 
 enable_itm_loss: True

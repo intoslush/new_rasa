@@ -216,7 +216,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
 
         # ========== 5) 评估与保存 ==========
         with torch.no_grad():
-            if epoch >= config.get('eval_epoch', 0) or args.evaluate:
+            if epoch >= config.get('eval_epoch', 0) or args.evaluate or (epoch == 0):
                 best, best_epoch, best_log_epoch = evaluate_and_checkpoint(
                     model_without_ddp=model_without_ddp,
                     test_loader=test_loader,
