@@ -93,14 +93,10 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
 
         if is_main and epoch == target_epoch:
             logger.info("========== [Dump args & config @ epoch=%d] ==========", epoch)
-
-            # args
             try:
                 logger.info("args (vars):\n%s", pprint.pformat(vars(args), width=120, sort_dicts=False))
             except Exception:
                 logger.info("args:\n%s", str(args))
-
-            # config（按 YAML 格式输出更直观）
             try:
                 buf = StringIO()
                 yaml.dump(config, buf)
@@ -111,7 +107,6 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
             logger.info("========== [End dump] ==========")
         # =======================================================
         if epoch<5 or epoch%2==1:
-        # ========== 1) 伪标签：生成 & 广播 & 应用 ==========
             image_pseudo_labels = generate_and_broadcast_pseudo_labels(
                 epoch=epoch,
                 device=device,
@@ -127,8 +122,6 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
                 enable_nmi_ari=True,
                 cluster_until_epoch=50,
             )
-
-            # 训练数据集应用伪标签 & 可选重置队列
             train_loader.dataset.mode = 'train'
             train_loader.dataset.set_pseudo_labels(image_pseudo_labels.cpu())
 
@@ -142,7 +135,6 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
                     )
                 if is_distributed:
                     dist.barrier()
-            # ========== 3) 分布式 sampler 状态刷新 ==========
         if is_distributed:
             dist.barrier()
             if hasattr(train_loader, 'sampler') and hasattr(train_loader.sampler, 'set_valid_indices'):
@@ -150,7 +142,6 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
             if hasattr(train_loader, 'sampler') and hasattr(train_loader.sampler, 'set_epoch'):
                 train_loader.sampler.set_epoch(epoch)
                 
-        # ========== 2) 调度器按 epoch 步进 ==========
         if epoch > 0:
             try:
                 scheduler.step(epoch)
@@ -172,13 +163,9 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
         if tb_writer is not None and is_main:
             _tb(tb_writer, dynamic_weights, "Weights", epoch)
             logger.info(f"[Rank {rank}] epoch {epoch} 使用的 loss 权重: {dynamic_weights}")
-
-        # === 训练循环 ===
         for n_iter, batch in enumerate(train_loader):
             # move to device
             batch = {k: (v.to(device, non_blocking=True) if hasattr(v, 'to') else v) for k, v in batch.items()}
-
-            # alpha warmup（保持旧逻辑）
             if epoch > 0 or not config.get('warm_up', False):
                 alpha = config['alpha']
             else:

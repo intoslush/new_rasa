@@ -113,65 +113,7 @@ class SaliencyMixin:
         }
         return g_norm, debug
     
-    @torch.no_grad()
-    def compute_cross_modal_saliency(
-        self,
-        text_ids,
-        attention_mask,
-        image_embeds,
-        image_atts,
-        layers: int = 3,
-        return_layer_deltas: bool = False,   # NEW
-    ):
-        out = self.text_encoder.bert(
-            input_ids=text_ids,
-            attention_mask=attention_mask,
-            encoder_hidden_states=image_embeds,
-            encoder_attention_mask=image_atts,
-            output_hidden_states=True,
-            output_attentions=False,
-            return_dict=True,
-            mode='multi_modal',
-        )
-        hidden_states = out.hidden_states
 
-        cfg = self.text_encoder.bert.config if hasattr(self.text_encoder, "bert") else self.text_encoder.config
-        fusion_layer = getattr(cfg, "fusion_layer", 0)
-        num_layers = cfg.num_hidden_layers
-
-        cross_layer_indices = list(range(fusion_layer, num_layers)) or list(range(max(0, num_layers - layers), num_layers))
-        if layers is not None and layers > 0 and layers < len(cross_layer_indices):
-            cross_layer_indices = cross_layer_indices[-layers:]
-
-        per_layer_deltas = []  # list([B,L])
-        for layer_idx in cross_layer_indices:
-            h_before = hidden_states[layer_idx]
-            h_after  = hidden_states[layer_idx + 1]
-            diff = (h_after - h_before).float()
-            delta = diff.pow(2).sum(-1).sqrt()   # [B,L]
-            per_layer_deltas.append(delta)
-
-        if len(per_layer_deltas) == 0:
-            sal = torch.zeros_like(attention_mask, dtype=torch.float32)
-        else:
-            sal = torch.stack(per_layer_deltas, dim=0).mean(0)  # [B,L]
-
-        sal = sal * attention_mask
-        sal_min = sal.masked_fill(attention_mask == 0, 1e9).amin(dim=1, keepdim=True)
-        sal_min = torch.where(torch.isinf(sal_min), torch.zeros_like(sal_min), sal_min)
-        sal_max = sal.amax(dim=1, keepdim=True)
-        denom = (sal_max - sal_min).clamp(min=1e-6)
-        sal_norm = ((sal - sal_min) / denom) * attention_mask
-
-        if not return_layer_deltas:
-            return sal_norm
-
-        # 额外返回：逐层 delta + 对应层号
-        # stack: [nL, B, L]
-        layer_delta_stack = torch.stack(per_layer_deltas, dim=0) if len(per_layer_deltas) else None
-        return sal_norm, layer_delta_stack, cross_layer_indices
-
-    
     @torch.no_grad()
     def build_curriculum_mask_probs(
         self,
