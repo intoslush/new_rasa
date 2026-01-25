@@ -63,14 +63,19 @@ enable_itm_softmask: False
 
 enable_infmask_loss: False
 
-enable_reasoning: true
-reasoning_start_epoch: 6          # 建议等模型稳定
-reason_top_p: 0.3                 # top token 比例
-reason_mask_token: "[MASK]"       # 或者 special id
-reason_use_text: "text2"          # "text1" or "text2"
-reason_kd_weight: 1.0
-reason_rank_weight: 1.0
-reason_rank_margin: 1.0
-reason_teacher_temp: 1.0          # teacher softening，可选
-reason_student_temp: 1.0
 
+#用来控制新家的clip方案的
+rationale_start_epoch: 10
+
+# ITM rationale（mask 低贡献词）
+itm_use_teacher_label: true
+itm_rationale_mask_ratio: 0.5          # 每句在“有效token”里，选 bottom-ratio 置 [MASK]
+itm_teacher_distill_temp: 1.0           # teacher->student 蒸馏温度
+itm_teacher_hard_label: false           # false: 用 soft distill；true: teacher argmax 变 hard label
+
+# MLM reasoning（mask 高贡献词）
+mlm_use_keytoken_mask: true
+mlm_keytoken_top_ratio: 0.5           # 只在 top-ratio 的高贡献词里高概率 mask
+mlm_keytoken_p_other: 0.00              # 其它 token 的 mask 概率（建议 0~0.02 保持多样性）
+# 维持整体 MLM mask 率的选项（可选）
+mlm_keep_global_mask_rate: true         # true 时自动把 top token 的 mask 概率调到使整体约等于 mlm_probability

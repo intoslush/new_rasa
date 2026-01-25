@@ -1,6 +1,16 @@
 import torch
 import math
 
+
+
+def _valid_token_mask(input_ids, attention_mask, tokenizer):
+    # 有效 token：非 padding 且非 special
+    valid = attention_mask.bool()
+    for tid in [tokenizer.cls_token_id, tokenizer.sep_token_id, tokenizer.pad_token_id]:
+        if tid is not None:
+            valid = valid & (input_ids != tid)
+    return valid
+
 class SaliencyMixin:
     @torch.no_grad()
     def compute_cross_modal_groundedness(
@@ -247,3 +257,73 @@ class SaliencyMixin:
 
         probs[~maskable] = 0.0
         return probs
+
+
+    def hard_mask_by_saliency(
+        self,
+        input_ids, attention_mask, saliency, tokenizer,
+        mask_ratio: float, mode: str  # mode in {"low", "high"}
+    ):
+        """
+        ITM 用：按 saliency 选 token，直接置为 [MASK]。
+        saliency: [B, L]，数值越大表示越关键
+        """
+        masked = input_ids.clone()
+        valid = _valid_token_mask(input_ids, attention_mask, tokenizer)
+        B, L = input_ids.shape
+        mask_id = tokenizer.mask_token_id
+
+        for b in range(B):
+            idxs = torch.nonzero(valid[b], as_tuple=False).squeeze(1)
+            if idxs.numel() == 0:
+                continue
+            k = int(mask_ratio * idxs.numel())
+            k = max(1, k)
+
+            scores = saliency[b, idxs]
+            largest = (mode == "high")
+            _, sel = torch.topk(scores, k=k, largest=largest)
+            masked[b, idxs[sel]] = mask_id
+
+        return masked
+
+    def prob_matrix_by_saliency(
+        input_ids, attention_mask, saliency, tokenizer,
+        base_prob: float,
+        top_ratio: float,
+        mode: str,           # {"low","high"}
+        p_other: float = 0.0,
+        keep_global_mask_rate: bool = False,
+    ):
+        """
+        MLM 用：构造 probability_matrix 给你现有的 self.mask() 去采样。
+        逻辑：top_ratio 的 token 用较高概率 base_prob，其他 token 用 p_other。
+        若 keep_global_mask_rate=True：会把 base_prob 自动调到使全句期望 mask 比例≈ base_prob_global（传入的 base_prob）。
+        """
+        prob = torch.zeros_like(input_ids, dtype=torch.float)
+        valid = _valid_token_mask(input_ids, attention_mask, tokenizer)
+        B, L = input_ids.shape
+
+        for b in range(B):
+            idxs = torch.nonzero(valid[b], as_tuple=False).squeeze(1)
+            if idxs.numel() == 0:
+                continue
+            k = int(top_ratio * idxs.numel())
+            k = max(1, k)
+
+            scores = saliency[b, idxs]
+            largest = (mode == "high")
+            _, sel = torch.topk(scores, k=k, largest=largest)
+
+            # 是否保持整体 mask 率
+            p_top = float(base_prob)
+            if keep_global_mask_rate:
+                # 目标整体 mask 率约等于 base_prob（外部传入的 mlm_probability）
+                # 只在 top_ratio 区域集中 mask：p_top ≈ mlm_probability / top_ratio
+                p_top = min(1.0, float(base_prob) / max(1e-6, top_ratio))
+
+            prob[b, idxs] = float(p_other)
+            prob[b, idxs[sel]] = float(p_top)
+
+        prob = prob * valid.float()
+        return prob
