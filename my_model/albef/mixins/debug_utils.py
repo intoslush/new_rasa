@@ -5,7 +5,7 @@ class DebugMaskMixin:
     """
     Pure-text debug for MLM masking:
       - per-token table: idx, tok_before, tok_after, masked?, p_mask, saliency, ranks
-      - optional summary metrics + top-k lists
+      - summary metrics + top-k lists
     """
 
     # -------------------------
@@ -34,14 +34,6 @@ class DebugMaskMixin:
             except Exception:
                 return str(ids)
 
-    def _maybe_get_scalar(self, mat, b, j, default=-1.0):
-        if mat is None:
-            return float(default)
-        try:
-            return float(mat[b, j].item())
-        except Exception:
-            return float(default)
-
     def _ascii_bar(self, x: float, width: int = 16) -> str:
         x = float(max(0.0, min(1.0, x)))
         n = int(round(x * width))
@@ -64,8 +56,7 @@ class DebugMaskMixin:
 
         s = scores.clone()
         s[~valid] = -1e9 if descending else 1e9
-        order = torch.argsort(s, descending=descending)  # valid tokens will float to front
-        # assign ranks only to valid
+        order = torch.argsort(s, descending=descending)
         r = 1
         for idx in order.tolist():
             if not bool(valid[idx]):
@@ -75,7 +66,7 @@ class DebugMaskMixin:
         return rank_map
 
     # -------------------------
-    # main entry (same name for compatibility)
+    # main entry
     # -------------------------
     @torch.no_grad()
     def debug_render_mask_with_norms(
@@ -89,24 +80,24 @@ class DebugMaskMixin:
         attention_mask: torch.Tensor,     # [B,L]
         probability_matrix: torch.Tensor = None,  # [B,L]
         saliency_norm: torch.Tensor = None,       # [B,L]
-        layer_deltas: torch.Tensor = None,        # [nL,B,L] optional
-        layer_indices=None,                       # list[int] optional
+        layer_deltas: torch.Tensor = None,
+        layer_indices=None,
         raw_texts=None,
         out_path: str = "./mask_output.txt",
         limit_per_epoch: int = 30,
         sample_per_step: int = 2,
         topk_tokens: int = 8,
         step_prob: float = 0.15,
-        # text-only options
         max_tokens_per_sample: int = 160,
-        show_all_tokens: bool = True,      # ✅ 你要“每个词”，就开这个
-        only_show_maskable: bool = False,  # 可选：只看可被 mask 的位置
-        max_table_rows: int = 260,         # 防止太长
+        show_all_tokens: bool = True,
+        only_show_maskable: bool = False,
+        max_table_rows: int = 260,
+        # NEW (optional): if you want to check "top focus group"
+        focus_top_p: float = None,        # e.g. 0.3, keep None if you don't want
     ):
         if not self._is_rank0():
             return
 
-        # reduce IO
         if step_prob < 1.0 and torch.rand(1).item() > float(step_prob):
             return
 
@@ -127,7 +118,6 @@ class DebugMaskMixin:
             sep = "=" * 120
             blocks.append(f"\n{sep}\n[Epoch {int(epoch)}] Mask Debug (TEXT-ONLY, per-token p_mask + saliency)\n{sep}\n")
 
-        # special ids
         pad_id = getattr(self.tokenizer, "pad_token_id", None)
         cls_id = getattr(self.tokenizer, "cls_token_id", None)
         sep_id = getattr(self.tokenizer, "sep_token_id", None)
@@ -138,15 +128,18 @@ class DebugMaskMixin:
                 break
 
             valid = attention_mask[b].bool()
-            masked_pos = (targets[b] != -100) & valid
 
-            # "maskable" (与 build_curriculum_mask_probs 对齐)
+            # maskable 与 build_curriculum_mask_probs 对齐：valid & 非 special
             maskable = valid.clone()
             if special_ids:
                 for sid in special_ids:
                     maskable &= (input_ids_before[b] != int(sid))
 
+            # ✅ 关键修复：masked_pos 应该对齐 maskable，而不是 valid
+            masked_pos = (targets[b] != -100) & maskable
+
             n_valid = int(valid.sum().item())
+            n_maskable = int(maskable.sum().item())
             n_masked = int(masked_pos.sum().item())
             if n_valid == 0:
                 continue
@@ -167,8 +160,8 @@ class DebugMaskMixin:
             toks0 = toks0[:show_L]
             toks1 = toks1[:show_L]
             valid_show = valid[:show_L]
-            masked_show = masked_pos[:show_L]
             maskable_show = maskable[:show_L]
+            masked_show = masked_pos[:show_L]
 
             orig_sent = self._safe_decode(ids0[:show_L], valid_mask=valid_show)
             after_sent = self._safe_decode(ids1[:show_L], valid_mask=valid_show)
@@ -180,34 +173,68 @@ class DebugMaskMixin:
                 except Exception:
                     raw = None
 
-            # ranks
-            sal_b = (saliency_norm[b, :show_L].float() if saliency_norm is not None
-                     else torch.zeros(show_L, device=input_ids_before.device, dtype=torch.float32))
-            prob_b = (probability_matrix[b, :show_L].float() if probability_matrix is not None
-                      else torch.zeros(show_L, device=input_ids_before.device, dtype=torch.float32))
+            # tensors
+            dev = input_ids_before.device
+            sal_b = (saliency_norm[b, :show_L].float().to(dev) if saliency_norm is not None
+                     else torch.zeros(show_L, device=dev, dtype=torch.float32))
+            prob_b = (probability_matrix[b, :show_L].float().to(dev) if probability_matrix is not None
+                      else torch.zeros(show_L, device=dev, dtype=torch.float32))
 
-            rank_sal = self._compute_rank_map(sal_b, valid_show, descending=True)
+            # ✅ 关键修复：rank_sal 也应基于 maskable_show（与 p_mask 对齐）
+            rank_sal = self._compute_rank_map(sal_b, maskable_show, descending=True)
             rank_prob = self._compute_rank_map(prob_b, maskable_show, descending=True)
 
             # summary metrics
             metric_lines = []
-            if saliency_norm is not None:
-                s_all = float(sal_b[valid_show].mean().item()) if n_valid > 0 else 0.0
-                s_m = float(sal_b[masked_show].mean().item()) if int(masked_show.sum().item()) > 0 else 0.0
-                ratio = s_m / (s_all + 1e-6)
-                metric_lines.append(f"  - sal_mean_all={s_all:.6f} | sal_mean_masked={s_m:.6f} | ratio={ratio:.4f}")
 
-                k = min(int(topk_tokens), max(1, int(valid_show.sum().item())))
+            if saliency_norm is not None:
+                if n_maskable > 0:
+                    s_all = float(sal_b[maskable_show].mean().item())
+                else:
+                    s_all = 0.0
+
+                if int(masked_show.sum().item()) > 0:
+                    s_m = float(sal_b[masked_show].mean().item())
+                else:
+                    s_m = 0.0
+
+                ratio = s_m / (s_all + 1e-6)
+                metric_lines.append(f"  - sal_mean_maskable={s_all:.6f} | sal_mean_masked={s_m:.6f} | ratio={ratio:.4f}")
+
+                # ✅ top-k saliency hit rate：也只在 maskable 集合里选 topk
+                k = min(int(topk_tokens), max(1, int(maskable_show.sum().item())))
                 s2 = sal_b.clone()
-                s2[~valid_show] = -1e9
+                s2[~maskable_show] = -1e9
                 topk_idx = torch.topk(s2, k=k, largest=True).indices
                 hit = float(masked_show[topk_idx].float().mean().item())
                 metric_lines.append(f"  - top{k}_sal_masked_hit_rate={hit:.4f}")
 
             if probability_matrix is not None:
-                p_all = float(prob_b[maskable_show].mean().item()) if int(maskable_show.sum().item()) > 0 else 0.0
-                p_m = float(prob_b[masked_show & maskable_show].mean().item()) if int((masked_show & maskable_show).sum().item()) > 0 else 0.0
-                metric_lines.append(f"  - p_mask_mean_maskable={p_all:.6f} | p_mask_mean_masked={p_m:.6f}")
+                if int(maskable_show.sum().item()) > 0:
+                    p_all = float(prob_b[maskable_show].mean().item())
+                    E_hat = float(prob_b[maskable_show].sum().item())  # 期望 masked 数
+                else:
+                    p_all, E_hat = 0.0, 0.0
+
+                if int((masked_show & maskable_show).sum().item()) > 0:
+                    p_m = float(prob_b[masked_show & maskable_show].mean().item())
+                else:
+                    p_m = 0.0
+
+                metric_lines.append(f"  - p_mask_mean_maskable={p_all:.6f} | p_mask_mean_masked={p_m:.6f} | E_hat=sum(p)={E_hat:.3f}")
+
+                # 可选：看 saliency 最高的一组 token 的平均 p 是否更高
+                if (focus_top_p is not None) and (n_maskable > 0):
+                    k_focus = int(round(float(focus_top_p) * float(n_maskable)))
+                    k_focus = max(1, min(k_focus, n_maskable))
+                    s3 = sal_b.clone()
+                    s3[~maskable_show] = -1e9
+                    idx_focus = torch.topk(s3, k=k_focus, largest=True).indices
+                    focus_mean_p = float(prob_b[idx_focus].mean().item())
+                    rest_mask = maskable_show.clone()
+                    rest_mask[idx_focus] = False
+                    rest_mean_p = float(prob_b[rest_mask].mean().item()) if int(rest_mask.sum().item()) > 0 else 0.0
+                    metric_lines.append(f"  - focus_top_p={float(focus_top_p):.3f}: mean_p_focus={focus_mean_p:.6f} | mean_p_rest={rest_mean_p:.6f}")
 
             # legacy layer delta (optional)
             layer_lines = []
@@ -221,7 +248,7 @@ class DebugMaskMixin:
                 if means:
                     layer_lines.insert(0, f"  - mean_over_layers={sum(means)/len(means):.6f}")
 
-            # build per-token table
+            # per-token table
             header = (
                 "IDX  M  MASKABLE  TOK_BEFORE           -> TOK_AFTER            | p_mask    | sal      | rank_sal | rank_p"
             )
@@ -257,25 +284,37 @@ class DebugMaskMixin:
                     table.append(f"... (table truncated at {max_table_rows} rows)")
                     break
 
-            # top-k lists (quick scan)
+            # quick scan top-k
             topk_txt = []
-            if saliency_norm is not None:
-                k = min(int(topk_tokens), max(1, int(valid_show.sum().item())))
+            if saliency_norm is not None and int(maskable_show.sum().item()) > 0:
+                k = min(int(topk_tokens), max(1, int(maskable_show.sum().item())))
                 s2 = sal_b.clone()
-                s2[~valid_show] = -1e9
+                s2[~maskable_show] = -1e9
                 idx = torch.topk(s2, k=k, largest=True).indices.tolist()
-                topk_txt.append("TOP-SAL: " + ", ".join([f"{i}:{toks0[i]}(sal={float(sal_b[i]):.3f},p={float(prob_b[i]):.3f})" for i in idx]))
-            if probability_matrix is not None:
+                topk_txt.append(
+                    "TOP-SAL: " + ", ".join(
+                        [f"{i}:{toks0[i]}(sal={float(sal_b[i]):.3f},p={float(prob_b[i]):.3f},mk={int(maskable_show[i].item())})" for i in idx]
+                    )
+                )
+
+            if probability_matrix is not None and int(maskable_show.sum().item()) > 0:
                 k = min(int(topk_tokens), max(1, int(maskable_show.sum().item())))
                 p2 = prob_b.clone()
                 p2[~maskable_show] = -1e9
                 idx = torch.topk(p2, k=k, largest=True).indices.tolist()
-                topk_txt.append("TOP-P  : " + ", ".join([f"{i}:{toks0[i]}(p={float(prob_b[i]):.3f},sal={float(sal_b[i]):.3f})" for i in idx]))
+                topk_txt.append(
+                    "TOP-P  : " + ", ".join(
+                        [f"{i}:{toks0[i]}(p={float(prob_b[i]):.3f},sal={float(sal_b[i]):.3f},mk={int(maskable_show[i].item())})" for i in idx]
+                    )
+                )
 
             # block write
             bt = []
             bt.append("-" * 120)
-            bt.append(f"Sample #{int(b)} | step={int(step)} | valid={n_valid} | maskable={int(maskable.sum().item())} | masked={n_masked} ({n_masked/max(1,n_valid):.3f})")
+            bt.append(
+                f"Sample #{int(b)} | step={int(step)} | valid={n_valid} | maskable={n_maskable} | "
+                f"masked={n_masked} (masked/maskable={n_masked/max(1,n_maskable):.3f})"
+            )
             if raw:
                 bt.append(f"RAW : {raw}")
             bt.append(f"ORIG: {orig_sent}")

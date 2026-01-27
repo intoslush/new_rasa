@@ -155,3 +155,4 @@ test.*
 data
 mask_output.txt
 mask_output2.txt
+temp/

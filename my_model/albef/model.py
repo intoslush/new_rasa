@@ -292,7 +292,7 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                     labels=labels,
                 )
             debug_epoch = int(config.get('debug_mask_epoch', 6))
-            if epoch >= debug_epoch and bool(config.get("debug_log_saliency", True)):
+            if epoch > debug_epoch and bool(config.get("debug_log_saliency", True)):
                 
                 # 注意力方案的debug
                 self.debug_render_mask_with_norms(
