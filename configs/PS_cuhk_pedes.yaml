@@ -9,7 +9,7 @@ bert_config: 'configs/config_bert.json'
 
 max_words: 50
 image_res: 384
-batch_size_train: 13
+batch_size_train: 16
 batch_size_test: 64
 
 mlm_probability: 0.15
@@ -52,7 +52,7 @@ enable_cl_loss: True
 itm_neg_sampling  : 'cl' # 一个参数决定采样方式：'cl' or 'random'，如果关cl需要改为random
 
 enable_mlm_loss:  True
-saliency_compute_epoch: 10 #计算saliency的epoch
+saliency_compute_epoch: 15 #计算saliency的epoch
 debug_mask_epoch: 10  #用来输出可视化的mask词的epoch
 mlm_soft_label: False
 debug_log_saliency: True  #用来输出可视化的mask词

@@ -125,67 +125,103 @@ class SaliencyMixin:
         p_strong: float = 0.95,
         p_min: float = 0.0,
         p_max: float = 0.95,
+        eps: float = 1e-8,
     ) -> torch.Tensor:
         """
-        返回 [B, L] 的概率矩阵，偏向显著性高的 token；无阶段，仅用于最后若干 epoch。
-        会自动求解非候选位置的 p_weak，使期望掩码比例接近 base_prob。
+        返回 [B, L] 的概率矩阵，偏向显著性高的 token（strong group）。
+        目标：每个样本的期望 mask 数接近 base_prob * n_valid，并在 [p_min, p_max] 约束下尽量守恒。
+
+        旧版本 bug：
+          - 当 p_weak < p_min 时，直接令 strong=E/ns, weak=p_min，会导致期望 E' = E + p_min*nw，系统性过量 mask。
+          - clamp 后不重算另一侧，也会破坏期望守恒。
+
+        新版本策略：
+          1) 选 top focus_top_p 为 strong 组
+          2) 先固定 p_strong 解 p_weak；若越界则固定 p_weak 到边界，反解 p_strong
+          3) 若边界约束导致无解或误差过大，兜底为全体均匀概率 p=E/n_valid（再 clamp）
         """
         device = saliency.device
         B, L = saliency.shape
         if base_prob is None:
-            base_prob = float(self.mlm_probability)
+            base_prob = float(getattr(self, "mlm_probability", 0.15))
 
-        # 可被 mask 的位置：有效 & 非特殊符号
+        # 1) maskable：有效 token & 非 special
         maskable = attention_mask.bool().clone()
-        for sp_id in [getattr(self.tokenizer, "pad_token_id", None),
-                      getattr(self.tokenizer, "cls_token_id", None),
-                      getattr(self.tokenizer, "sep_token_id", None)]:
+        for sp_id in [
+            getattr(self.tokenizer, "pad_token_id", None),
+            getattr(self.tokenizer, "cls_token_id", None),
+            getattr(self.tokenizer, "sep_token_id", None),
+        ]:
             if sp_id is not None:
                 maskable &= (input_ids != sp_id)
 
         probs = torch.zeros((B, L), device=device, dtype=torch.float32)
 
+        # 工具：clamp float
+        def _clamp(x: float) -> float:
+            return float(max(p_min, min(p_max, x)))
+
         for b in range(B):
             valid_pos = maskable[b]
             n_valid = int(valid_pos.sum().item())
-            if n_valid == 0:
+            if n_valid <= 0:
                 continue
 
-            target_E = base_prob * n_valid
+            # 期望 mask 数
+            E = float(base_prob) * float(n_valid)
 
-            sal_b = saliency[b].clone()
+            # 2) 选 strong 候选（topk in valid positions）
+            sal_b = saliency[b].float().clone()
             sal_b[~valid_pos] = -1e9
-            k_candidate = max(1, int(round(n_valid * focus_top_p)))
-            k_candidate = min(k_candidate, n_valid)
-            topk_vals, topk_idx = torch.topk(sal_b, k_candidate, dim=-1, largest=True, sorted=False)
+            k = int(round(n_valid * float(focus_top_p)))
+            k = max(1, min(k, n_valid))
+
+            _, topk_idx = torch.topk(sal_b, k, dim=-1, largest=True, sorted=False)
             strong_mask = torch.zeros(L, dtype=torch.bool, device=device)
             strong_mask[topk_idx] = True
             strong_mask &= valid_pos
 
-            n_strong = int(strong_mask.sum().item())
-            if n_strong == 0:
-                p = max(p_min, min(p_max, base_prob))
-                probs[b, valid_pos] = p
+            ns = int(strong_mask.sum().item())
+            nw = int(n_valid - ns)
+
+            # 兜底：如果 ns==0 或 nw==0，直接均匀/只在一侧求解
+            if ns <= 0:
+                pU = _clamp(E / max(1.0, float(n_valid)))
+                probs[b, valid_pos] = pU
                 continue
 
-            remain = max(0, n_valid - n_strong)
-            if remain == 0:
-                p_strong_adj = min(p_strong, target_E / max(1, n_strong))
-                p_strong_adj = float(max(p_min, min(p_max, p_strong_adj)))
-                probs[b, strong_mask] = p_strong_adj
+            if nw <= 0:
+                # 全是 strong
+                pS = _clamp(E / max(1.0, float(ns)))
+                probs[b, strong_mask] = pS
                 continue
 
-            p_weak = (target_E - p_strong * n_strong) / remain
-            if p_weak < p_min - 1e-9:
-                p_strong_adj = target_E / n_strong
-                p_strong_adj = float(max(p_min, min(p_max, p_strong_adj)))
-                probs[b, strong_mask] = p_strong_adj
-                probs[b, valid_pos & (~strong_mask)] = float(p_min)
+            # 3) 先固定 p_strong 解 p_weak
+            pS = float(p_strong)
+            pW = (E - pS * ns) / max(1.0, float(nw))
+
+            # 若 pW 越界：固定 pW 到边界，反解 pS（保证守恒）
+            if pW < p_min:
+                pW = float(p_min)
+                pS = (E - pW * nw) / max(1.0, float(ns))
+            elif pW > p_max:
+                pW = float(p_max)
+                pS = (E - pW * nw) / max(1.0, float(ns))
+
+            # clamp 后检查是否还能接近期望
+            pS_c = _clamp(pS)
+            pW_c = _clamp(pW)
+            E_hat = pS_c * ns + pW_c * nw
+
+            # 如果误差过大（通常是边界约束导致无解），兜底均匀概率
+            # 误差阈值：相对 E 或绝对很小情况下用绝对阈值
+            tol = max(1e-4 * max(1.0, E), 1e-3)
+            if abs(E_hat - E) > tol:
+                pU = _clamp(E / max(1.0, float(n_valid)))
+                probs[b, valid_pos] = pU
             else:
-                p_strong_adj = float(max(p_min, min(p_max, p_strong)))
-                p_weak_adj = float(max(p_min, min(p_max, p_weak)))
-                probs[b, strong_mask] = p_strong_adj
-                probs[b, valid_pos & (~strong_mask)] = p_weak_adj
+                probs[b, strong_mask] = pS_c
+                probs[b, valid_pos & (~strong_mask)] = pW_c
 
         probs[~maskable] = 0.0
         return probs
