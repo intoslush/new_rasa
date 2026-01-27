@@ -9,7 +9,7 @@ from utils.options import get_args
 
 
 # 如果你 tokenizer 是 huggingface 的 AutoTokenizer / BertTokenizer，一般是这样构建：
-from transformers import AutoTokenizer
+
 from transformers import BertModel, BertTokenizer 
 
 
