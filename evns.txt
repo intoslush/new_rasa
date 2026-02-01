@@ -10,3 +10,5 @@ scikit-learn
 faiss-gpu
 numpy<2.0
 tensorboard
+opencv-python 
+matplotlib

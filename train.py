@@ -7,6 +7,7 @@ import time
 from datetime import timedelta
 from dataset import get_dataloder
 from processor.processor import do_train
+from processor.processor import run_analysis_and_vis
 # from utils.checkpoint import Checkpointer
 from utils.iotools import save_train_configs
 from utils.logger import setup_logger
@@ -56,7 +57,7 @@ if __name__ == '__main__':
     else:
         logger.info("模型初始化化成功")
         model.to(device)
-    # model = torch.compile(model)#优化运行速度pytorch2.x专享 ##疯狂报错捏放弃了
+   
     #获取dataloader
     train_loader, val_loader, test_loader, cluster_lodaer = get_dataloder(args)
     logger.info("dataloader加载成功")
@@ -66,7 +67,9 @@ if __name__ == '__main__':
     #     start_epoch = checkpoint['epoch']
 
     # do_train(start_epoch, args, model, train_loader, evaluator, optimizer, scheduler, checkpointer)
+    
     do_train(start_epoch, args, model, train_loader, None, None,cluster_lodaer,test_loader)
+    
     
     if args.distributed:
         torch.distributed.destroy_process_group()#多卡结束

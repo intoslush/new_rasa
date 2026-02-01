@@ -185,7 +185,7 @@ class ps_train_dataset(Dataset):
             real_idx = index
 
         image_path, caption, person = self.pairs[real_idx]
-
+        rel_path, caption, person = self.pairs[real_idx]
         # 关键：把 real_idx 传入增广，支持 pseudo augment
         caption_aug, replace = self.augment(caption, person, real_idx=real_idx)
 
@@ -193,7 +193,10 @@ class ps_train_dataset(Dataset):
         image = Image.open(image_path).convert('RGB')
         image1 = self.transform(image)
         image2 = self.transform(image)
-
+        
+        abs_path = os.path.join(self.image_root, rel_path)
+        image = Image.open(abs_path).convert('RGB')
+        orig_w, orig_h = image.size
         caption1 = pre_caption(caption, self.max_words)
         caption2 = pre_caption(caption_aug, self.max_words)
 
@@ -205,7 +208,9 @@ class ps_train_dataset(Dataset):
             'person_id': person,
             'replace_flag': replace,
             'real_index': real_idx,
-            'pseudo_label': self.pseudo_labels[real_idx]
+            'pseudo_label': self.pseudo_labels[real_idx],
+            'image_path': abs_path,           # str
+            'orig_size': (orig_w, orig_h),    # tuple
         }
 
 class ps_eval_dataset(Dataset):

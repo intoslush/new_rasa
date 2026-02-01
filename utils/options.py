@@ -8,7 +8,7 @@ def get_args():
     parser.add_argument('--config', default='./configs/PS_cuhk_pedes.yaml')
     # parser.add_argument('--output_dir', default='output/cuhk-pedes')
     parser.add_argument('--checkpoint', default='')
-    parser.add_argument('--resume', action='store_true')
+
     parser.add_argument('--eval_mAP', action='store_true', help='whether to evaluate mAP')
     parser.add_argument('--text_encoder', default='bert-base-uncased')
     parser.add_argument('--evaluate', action='store_true')
@@ -31,7 +31,7 @@ def get_args():
     parser.add_argument("--log_period", default=500)
     parser.add_argument("--eval_period", default=1)
     parser.add_argument("--val_dataset", default="test") # use val set when evaluate, if test use test set
-    # parser.add_argument("--resume", default=False, action='store_true')
+    parser.add_argument("--resume", default=False)
     parser.add_argument("--resume_ckpt_file", default="", help='resume from ...')
 
     # ######################## model general settings ########################

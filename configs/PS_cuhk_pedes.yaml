@@ -1,9 +1,9 @@
 train_file:  ['./re_id/CUHK-PEDES/processed_data/train.json']
 val_file: './re_id/CUHK-PEDES/processed_data/val.json'
-test_file: './re_id/CUHK-PEDES/processed_data/test.json'
+test_file: './re_id/ICFG-PEDES/processed_data/test.json'
 train_image_root: './re_id/CUHK-PEDES/imgs'
 val_image_root: './re_id/CUHK-PEDES/imgs'
-test_image_root: './re_id/CUHK-PEDES/imgs'
+test_image_root: './re_id/ICFG-PEDES/imgs'
 
 bert_config: 'configs/config_bert.json'
 
@@ -53,7 +53,7 @@ itm_neg_sampling  : 'cl' # 一个参数决定采样方式：'cl' or 'random'，�
 
 enable_mlm_loss:  True
 saliency_compute_epoch: 15 #计算saliency的epoch
-debug_mask_epoch: 10  #用来输出可视化的mask词的epoch
+debug_mask_epoch: 15  #用来输出可视化的mask词的epoch
 mlm_soft_label: False
 debug_log_saliency: True  #用来输出可视化的mask词
 

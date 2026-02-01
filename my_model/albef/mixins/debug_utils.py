@@ -1,5 +1,6 @@
 import os
 import torch
+import json
 
 class DebugMaskMixin:
     """
@@ -21,6 +22,8 @@ class DebugMaskMixin:
 
     def _tokenize_ids(self, ids):
         return [self.tokenizer.convert_ids_to_tokens(int(t)) for t in ids]
+    
+    
 
     def _safe_decode(self, ids, valid_mask=None):
         try:
@@ -42,6 +45,25 @@ class DebugMaskMixin:
     def _clip(self, s: str, n: int = 18) -> str:
         s = str(s)
         return s if len(s) <= n else (s[: n - 1] + "…")
+    
+    def _word_level_groups(self, tokens):
+        """
+        BERT WordPiece -> word-level grouping
+        Returns: list of lists, each inner list contains indices of subwords for one word
+        """
+        groups = []
+        current = []
+        for i, tok in enumerate(tokens):
+            if tok.startswith("##"):
+                current.append(i)
+            else:
+                if current:
+                    groups.append(current)
+                current = [i]
+        if current:
+            groups.append(current)
+        return groups
+
 
     def _compute_rank_map(self, scores: torch.Tensor, valid: torch.Tensor, descending: bool = True):
         """
@@ -94,6 +116,7 @@ class DebugMaskMixin:
         max_table_rows: int = 260,
         # NEW (optional): if you want to check "top focus group"
         focus_top_p: float = None,        # e.g. 0.3, keep None if you don't want
+        stats_csv_path: str = "./mask_stats.csv",
     ):
         if not self._is_rank0():
             return
@@ -343,3 +366,86 @@ class DebugMaskMixin:
             with open(out_path, "a", encoding="utf-8") as f:
                 f.write("\n".join(blocks) + "\n")
             self._dbg_written_per_epoch_text[int(epoch)] = int(written)
+    
+    def _merge_subwords_and_dump(self, input_ids, probability_matrix, file_path):
+        """
+        核心逻辑：
+        1. 将 ID 转为 token list
+        2. 识别 '##' 开头的 subword，并将其概率与主词合并（取平均）
+        3. 写入 JSONL
+        """
+        # 转为 list
+        tokens = self.tokenizer.convert_ids_to_tokens(input_ids)
+        probs = probability_matrix.tolist()
+        
+        merged_data = []
+        
+        # 缓存当前词的信息
+        current_word_parts = []
+        current_probs = []
+        
+        for t, p in zip(tokens, probs):
+            # 跳过特殊 token (根据你的需求，这里先全部读入，由绘图脚本过滤也可以，
+            # 但为了减小文件体积，建议在这里过滤掉 [PAD] 等)
+            if t in ['[PAD]', '[CLS]', '[SEP]']:
+                continue
+                
+            if t.startswith("##"):
+                # 是子词，去掉 ## 后加入当前缓存
+                current_word_parts.append(t[2:])
+                current_probs.append(p)
+            else:
+                # 是新词，先结算上一个词（如果有的话）
+                if current_word_parts:
+                    full_word = "".join(current_word_parts)
+                    avg_prob = sum(current_probs) / len(current_probs)
+                    merged_data.append({"w": full_word, "p": avg_prob})
+                
+                # 开启新词
+                current_word_parts = [t]
+                current_probs = [p]
+        
+        # 结算最后一个词
+        if current_word_parts:
+            full_word = "".join(current_word_parts)
+            avg_prob = sum(current_probs) / len(current_probs)
+            merged_data.append({"w": full_word, "p": avg_prob})
+            
+        # 批量写入文件 (JSONL 格式：一行一个样本的 list，或者一行一个词，建议一行一个样本以减少 IO)
+        if merged_data:
+            with open(file_path, "a", encoding="utf-8") as f:
+                # 写入格式：[{"w":"jacket", "p":0.95}, {"w":"is", "p":0.1}, ...]
+                f.write(json.dumps(merged_data) + "\n")
+
+    @torch.no_grad()
+    def dump_global_mask_stats(
+        self,
+        *,
+        input_ids,          # [B, L]
+        probability_matrix, # [B, L]
+        step,
+        out_path="./mask_stats.jsonl",
+        sample_ratio=0.1    # 采样率，全量存数据太大，建议存 10% 或 20%
+    ):
+        """
+        专门用于 Fig.A 的数据收集函数
+        """
+        if not self._is_rank0():
+            return
+            
+        # 随机采样一部分 batch 存盘，避免文件过大爆炸
+        if torch.rand(1).item() > sample_ratio:
+            return
+
+        self._ensure_dir(out_path)
+        
+        B = input_ids.shape[0]
+        # 遍历 Batch 中的每一句话
+        for b in range(B):
+            # 获取有效的 mask 概率 (排除 padding 部分的概率，虽然上面有 token 过滤，但这里做个双保险)
+            # 注意：probability_matrix 在 pad 位置通常是 0，或者未定义，需要结合 input_ids 过滤
+            self._merge_subwords_and_dump(
+                input_ids[b], 
+                probability_matrix[b], 
+                out_path
+            )
