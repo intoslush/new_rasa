@@ -1,15 +1,15 @@
-train_file:  ['../dataset/RSTPReid/processed_data/train.json']
-val_file: '../dataset/RSTPReid/processed_data/val.json'
-test_file: '../dataset/RSTPReid/processed_data/test.json'
-train_image_root: '../dataset/RSTPReid/imgs'
-val_image_root: '../dataset/RSTPReid/imgs'
-test_image_root: '../dataset/RSTPReid/imgs'
+train_file:  ['./re_id/RSTPReid/processed_data/train.json']
+val_file: './re_id/RSTPReid/processed_data/val.json'
+test_file: './re_id/RSTPReid/processed_data/test.json'
+train_image_root: './re_id/RSTPReid/imgs'
+val_image_root: './re_id/RSTPReid/imgs'
+test_image_root: './re_id/RSTPReid/imgs'
 
 bert_config: 'configs/config_bert.json'
 
 max_words: 50
 image_res: 384
-batch_size_train: 13
+batch_size_train: 16
 batch_size_test: 64
 
 mlm_probability: 0.15
@@ -27,13 +27,36 @@ alpha: 0.4
 warm_up: True
 
 optimizer: {opt: adamW, lr: 1e-5, weight_decay: 0.02, lr_custm: 1e-4}
-schedular: {sched: cosine, lr: 1e-5, epochs: 30, min_lr: 1e-6, decay_rate: 1, warmup_lr: 1e-5, warmup_epochs: 1, cooldown_epochs: 0}
+schedular: {sched: cosine, lr: 1e-5, epochs: 35, min_lr: 2e-6, decay_rate: 1, warmup_lr: 1e-5, warmup_epochs: 1, cooldown_epochs: 0}
 
-eval_epoch: 0
+eval_epoch: 10
 
-weights:
-  - 0.5
-  - 1
-  - 1
-  - 0.5
-  - 0.5
+
+weights: {"loss_cl": 0.5, "loss_itm": 1, "loss_mlm": 1, "loss_prd": 0.5, "loss_mrtd": 0.5,"loss_sim": 0.5, "loss_itm_softmask": 1}
+# 新增的权重调度配置
+weights_schedule:
+  freeze_epochs: 40     # 前 20 个 epoch 不变
+  mode: "cosine"        # 可改为 "cosine" 获得更平滑的变化linear
+  normalize_sum: false  # 若希望总权重和保持不变可改为 true
+  loss_cl:
+    min: 0            # 20 之后从 0.5 线性降到 0.1（到最后一个 epoch 达到）
+  loss_mlm:
+    max: 1.5 
+  loss_itm:
+    min: 0.2 
+    max: 1.5
+
+use_momentum_queue: True #是否使用动量
+use_queue: True #是否使用队列
+reset_queue_each_epoch: False  #每个epoch是否重置队列
+enable_cl_loss: True
+itm_neg_sampling  : 'cl' # 一个参数决定采样方式：'cl' or 'random'，如果关cl需要改为random
+
+enable_mlm_loss:  True
+saliency_compute_epoch: 15 #计算saliency的epoch
+debug_mask_epoch: 15  #用来输出可视化的mask词的epoch
+mlm_soft_label: False
+debug_log_saliency: True  #用来输出可视化的mask词
+
+
+enable_itm_loss: True

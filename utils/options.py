@@ -33,6 +33,8 @@ def get_args():
     parser.add_argument("--val_dataset", default="test") # use val set when evaluate, if test use test set
     # parser.add_argument("--resume", default=False, action='store_true')
     parser.add_argument("--resume_ckpt_file", default="", help='resume from ...')
+    parser.add_argument("--cluster_id_mode", default="cluster", type=str, help="choose from ['cluster', 'instance', 'unique_noise']")
+    parser.add_argument("--massage", default=" ")
 
     # ######################## model general settings ########################
     # parser.add_argument("--pretrain_choice", default='ViT-B/16') # whether use pretrained model  
