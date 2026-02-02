@@ -128,7 +128,7 @@ def generate_and_broadcast_pseudo_labels(
 
     # 新增：从 args 获取聚类 id 策略
     cluster_id_mode = getattr(args, "cluster_id_mode", "cluster")
-    cluster_id_mode="cluster"
+    # cluster_id_mode="cluster"
 
     if is_main:
         with torch.no_grad():
