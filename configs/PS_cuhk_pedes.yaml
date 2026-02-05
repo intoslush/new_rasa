@@ -28,7 +28,7 @@ warm_up: True
 optimizer: {opt: adamW, lr: 1e-5, weight_decay: 0.02, lr_custm: 1e-4}
 schedular: {sched: cosine, lr: 1e-5, epochs: 35, min_lr: 2e-6, decay_rate: 1, warmup_lr: 1e-5, warmup_epochs: 1, cooldown_epochs: 0}
 
-eval_epoch: 10
+eval_epoch: 0
 
 
 weights: {"loss_cl": 0.5, "loss_itm": 1, "loss_mlm": 1, "loss_prd": 0.5, "loss_mrtd": 0.5,"loss_sim": 0.5, "loss_itm_softmask": 1}
@@ -47,7 +47,7 @@ weights_schedule:
 
 use_momentum_queue: True #是否使用动量
 use_queue: True #是否使用队列
-reset_queue_each_epoch: False  #每个epoch是否重置队列
+reset_queue_each_epoch: True  #每个epoch是否重置队列
 enable_cl_loss: True
 itm_neg_sampling  : 'cl' # 一个参数决定采样方式：'cl' or 'random'，如果关cl需要改为random
 
@@ -56,6 +56,12 @@ saliency_compute_epoch: 10 #计算saliency的epoch
 debug_mask_epoch: 10  #用来输出可视化的mask词的epoch
 mlm_soft_label: False
 debug_log_saliency: False  #用来输出可视化的mask词
+
+cluster_feature_mode : "image"
+cluster_fusion_use_proj : False   # 保持“融合 CLS 原始特征”
+# cluster_text_key : "caption1"     # 也可改 caption1
+cluster_min_samples : 3
+cluster_eps : 0.6
 
 
 enable_itm_loss: True

@@ -6,6 +6,103 @@ import torch.nn.functional as F
 
 from sklearn.cluster import DBSCAN  # 可选：如果内存允许、想用更快的 C 实现，可以开启下面的 sklearn 分支
 
+@torch.no_grad()
+def _infer_cluster_feat_dim(model_no_ddp, config, mode: str) -> int:
+    mode = mode.lower()
+    if mode == "image":
+        return int(model_no_ddp.vision_proj.out_features)  # embed_dim
+    elif mode == "text":
+        use_proj = bool(config.get("cluster_text_use_proj", False))
+        if use_proj:
+            return int(model_no_ddp.text_proj.out_features)  # embed_dim
+        return int(model_no_ddp.text_encoder.config.hidden_size)  # text_width
+    elif mode == "fusion":
+        use_proj = bool(config.get("cluster_fusion_use_proj", False))
+        if use_proj:
+            return int(model_no_ddp.text_proj.out_features)  # embed_dim
+        return int(model_no_ddp.text_encoder.config.hidden_size)  # text_width
+    else:
+        raise ValueError(f"Unknown cluster_feature_mode: {mode}")
+
+
+@torch.no_grad()
+def extract_cluster_features(batch, model_no_ddp, tokenizer, config, device: torch.device) -> torch.Tensor:
+    """
+    返回 [B, D] 的 L2-normalized 特征，用于后续 jaccard + DBSCAN。
+    由 config['cluster_feature_mode'] 控制:
+      - 'image' : vision_proj(image_cls)
+      - 'text'  : text_cls (可选 text_proj)
+      - 'fusion': fusion_cls (可选 text_proj)
+    """
+    mode = str(config.get("cluster_feature_mode", "image")).lower()
+
+    # ---------------- image-only ----------------
+    if mode == "image":
+        image = batch["image1"].to(device, non_blocking=True)
+        image_embeds = model_no_ddp.visual_encoder(image)
+        feat = model_no_ddp.vision_proj(image_embeds[:, 0, :])
+        return F.normalize(feat, dim=-1)
+
+    # text / fusion 需要 tokenizer
+    if tokenizer is None:
+        raise ValueError("tokenizer is required when cluster_feature_mode is 'text' or 'fusion'.")
+
+    # 选用哪个 caption 做聚类（默认 caption2；你也可以切 caption1）
+    text_key = str(config.get("cluster_text_key", "caption2"))
+    texts = batch[text_key]
+    text = tokenizer(
+        texts,
+        padding="longest",
+        max_length=int(config["max_words"]),
+        return_tensors="pt",
+        truncation=True,
+    ).to(device)
+
+    # ---------------- text-only ----------------
+    if mode == "text":
+        out = model_no_ddp.text_encoder.bert(
+            text["input_ids"],
+            attention_mask=text["attention_mask"],
+            return_dict=True,
+            mode="text",
+        )
+        cls = out.last_hidden_state[:, 0, :]  # [B, text_width]
+
+        if bool(config.get("cluster_text_use_proj", False)):
+            cls = model_no_ddp.text_proj(cls)  # -> [B, embed_dim]
+        return F.normalize(cls, dim=-1)
+
+    # ---------------- fusion CLS ----------------
+    if mode == "fusion":
+        image = batch["image1"].to(device, non_blocking=True)
+        image_embeds = model_no_ddp.visual_encoder(image)
+        image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long, device=device)
+
+        # 先跑一遍 text mode 得到 encoder_embeds（保持和你 forward 一致）
+        text_out = model_no_ddp.text_encoder.bert(
+            text["input_ids"],
+            attention_mask=text["attention_mask"],
+            return_dict=True,
+            mode="text",
+        )
+        text_embeds = text_out.last_hidden_state  # [B, L, text_width]
+
+        fusion_out = model_no_ddp.text_encoder.bert(
+            encoder_embeds=text_embeds,
+            attention_mask=text["attention_mask"],
+            encoder_hidden_states=image_embeds,
+            encoder_attention_mask=image_atts,
+            return_dict=True,
+            mode="fusion",
+        )
+        cls = fusion_out.last_hidden_state[:, 0, :]  # [B, text_width]  <-- 你要的“融合层最后一层 CLS”
+
+        if bool(config.get("cluster_fusion_use_proj", False)):
+            cls = model_no_ddp.text_proj(cls)  # -> [B, embed_dim]
+        return F.normalize(cls, dim=-1)
+
+    raise ValueError(f"Unknown cluster_feature_mode: {mode}")
+
 
 def compute_jaccard_to_memmap(
     features: torch.Tensor,
@@ -160,16 +257,7 @@ def dbscan_memmap(jaccard_path: str, eps: float = 0.6, min_samples: int = 4):
 
 @torch.no_grad()
 def cluster_begin_epoch(train_loader, model, args, config, tokenizer=None, logger=None):
-    """
-    计算 image features -> re-ranking jaccard (写 memmap) -> DBSCAN 聚类 -> 返回 pseudo labels（numpy array）。
-    支持分布式：只有 rank 0 做保存和聚类，其他 rank 通过 broadcast_object_list 拿到结果。
-    """
     device = torch.device("cuda")
-    feature_size = 256  # cuhk 是 256，融合后可能更大
-    max_size = len(train_loader.dataset)
-    # 以 float16 在 GPU 上建 bank，训练后保存为 CPU 便于复用
-    image_bank = torch.empty((max_size, feature_size), device=device, dtype=torch.float16)
-    index = 0
 
     model = model.to(device)
     model.eval()
@@ -178,96 +266,109 @@ def cluster_begin_epoch(train_loader, model, args, config, tokenizer=None, logge
     else:
         model_no_ddp = model
 
-    test = False  # 保留原来测试加载开关
-    save_path = "./logs/pseudo_labels.pt"
-    save_feats = "./logs/feats.pt"
+    max_size = len(train_loader.dataset)
+    feat_dim = _infer_cluster_feat_dim(model_no_ddp, config, mode=str(config.get("cluster_feature_mode", "image")))
+    # bank 放 GPU，float16 足够
+    feat_bank = torch.empty((max_size, feat_dim), device=device, dtype=torch.float16)
 
-    logger.info("开始计算伪标签")
+    index = 0
 
-    # 1. load cached image features if exist
+    # 输出路径按模式区分，避免互相覆盖
+    mode = str(config.get("cluster_feature_mode", "image")).lower()
+    save_path = f"./logs/pseudo_labels_{mode}.pt"
+    save_feats = f"./logs/feats_{mode}.pt"
+    jaccard_path = f"./tmp/{mode}_rerank_jaccard.memmap"
+    os.makedirs("./logs", exist_ok=True)
+    os.makedirs("./tmp", exist_ok=True)
+
+    test = False  # 保留你的缓存开关
+
+    logger.info(f"开始计算伪标签 | cluster_feature_mode={mode} | feat_dim={feat_dim}")
+
+    # 1) load cached features if exist
     if test and os.path.exists(save_feats):
-        image_bank_cpu = torch.load(save_feats, weights_only=False)
-        image_bank = image_bank_cpu.to(device=device, dtype=torch.float16)
-        logger.info(f"检测到已保存的图像特征，加载 {save_feats}")
+        bank_cpu = torch.load(save_feats, weights_only=False)
+        feat_bank = bank_cpu.to(device=device, dtype=torch.float16)
+        index = feat_bank.size(0)
+        logger.info(f"检测到已保存的特征，加载 {save_feats}")
     else:
-        with torch.no_grad():
-            for i, batch in enumerate(train_loader):
-                image1 = batch['image1'].to(device, non_blocking=True)
-                batch_size = image1.size(0)
+        for i, batch in enumerate(train_loader):
+            # 关键：按模式抽取 [B, D] 特征
+            feats = extract_cluster_features(batch, model_no_ddp, model.tokenizer, config, device)  # float32/16
+            feats = feats.to(torch.float16)
 
-                # 提取视觉 embedding
-                image_embeds = model_no_ddp.visual_encoder(image1)
-                image_feat = F.normalize(model_no_ddp.vision_proj(image_embeds[:, 0, :]), dim=-1)  # cls token
-                image_bank[index: index + batch_size] = image_feat.to(torch.float16)
-                index += batch_size
+            bs = feats.size(0)
+            feat_bank[index:index + bs] = feats
+            index += bs
 
-        # 保存特征（仅 rank 0）
+        # 可选保存（仅 rank0）
         if test and (not args.distributed or (args.distributed and torch.distributed.get_rank() == 0)):
-            torch.save(image_bank.cpu(), save_feats)
-            logger.info(f"图像特征已保存至 {save_feats}")
+            torch.save(feat_bank[:index].cpu(), save_feats)
+            logger.info(f"特征已保存至 {save_feats}")
 
-    # 2. 计算 re-ranking jaccard 并 dump 到 memmap
+    if index != max_size:
+        # 重要：如果你在 DDP 下用 DistributedSampler，这里通常会触发（每张卡只看一部分数据）
+        logger.warning(f"注意：feature bank 填充长度 index={index} != dataset_len={max_size}。"
+                       f"如果你在分布式聚类，请确保用全量数据/或先 gather 特征。")
+
+    # 2) 计算 jaccard 并写 memmap（只用已经填充的部分）
+    feat_bank_used = feat_bank[:index].to(torch.float32)
+
     if args.distributed:
         search_option = 2
-        logger.info(f"Rank {torch.distributed.get_rank()} | 开始计算不同类之间的距离")
+        logger.info(f"Rank {torch.distributed.get_rank()} | 开始计算距离")
     else:
         search_option = 3
-        logger.info("单卡 | 开始计算不同类之间的距离")
+        logger.info("单卡 | 开始计算距离")
 
-    jaccard_path = "./tmp/image_rerank_jaccard.memmap"
-    # 保证目录
-    os.makedirs(os.path.dirname(jaccard_path), exist_ok=True)
-
-    # 注意：这里传 float32 使数值稳定，内部会转 dtype（use_float16 控制最终 jaccard 存储精度）
     compute_jaccard_to_memmap(
-        image_bank.to(torch.float32),
+        feat_bank_used,
         out_path=jaccard_path,
-        k1=30,
-        k2=6,
+        k1=int(config.get("cluster_k1", 30)),
+        k2=int(config.get("cluster_k2", 6)),
         use_float16=True,
-        row_chunk=1024,
+        row_chunk=int(config.get("cluster_row_chunk", 1024)),
         search_option=search_option
     )
 
-    # 释放 image_bank 以腾出 GPU
-    del image_bank
+    # 释放 GPU bank
+    del feat_bank, feat_bank_used
     torch.cuda.empty_cache()
     gc.collect()
 
-    # 3. 聚类：用 memmap 版本（不吃大量 RAM）
+    # 3) DBSCAN on memmap
     logger.info("开始基于 memmap 的 DBSCAN 聚类")
-    image_pseudo_labels = None
     if args.distributed:
         rank = torch.distributed.get_rank()
     else:
         rank = 0
 
+    image_pseudo_labels = None
     if (not args.distributed) or (args.distributed and rank == 0):
-        # 实际聚类只有主节点做
-        image_pseudo_labels = dbscan_memmap(jaccard_path, eps=0.6, min_samples=4)
+        image_pseudo_labels = dbscan_memmap(
+            jaccard_path,
+            eps=float(config.get("cluster_eps", 0.6)),
+            min_samples=int(config.get("cluster_min_samples", 4))
+        )
         logger.info("聚类完成（主节点）")
-
-        # 保存伪标签
         if not os.path.exists(save_path):
             torch.save(image_pseudo_labels, save_path)
             logger.info(f"伪标签已保存至 {save_path}")
 
-    # 4. 分布式广播 pseudo labels 给其他 rank（如果有）
+    # 4) broadcast labels
     if args.distributed:
-        # 使用 broadcast_object_list 来同步 numpy array
         labels_list = [None]
         if rank == 0:
             labels_list[0] = image_pseudo_labels
         torch.distributed.broadcast_object_list(labels_list, src=0)
         image_pseudo_labels = labels_list[0]
 
-    # 5. 打印统计
-    dataset_len = len(train_loader.dataset)
+    # 5) stats
     num_noise = int((image_pseudo_labels == -1).sum())
     unique_labels = set(image_pseudo_labels.tolist())
     num_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
-    logger.info(f"Dataset 总长度: {dataset_len}, 最终输出的伪标签长度: {len(image_pseudo_labels)}")
+    logger.info(f"Dataset 总长度: {len(train_loader.dataset)}, 输出伪标签长度: {len(image_pseudo_labels)}")
     logger.info(f"聚类数（不含 -1）: {num_clusters}")
-    logger.info(f"-1 (未归入任何簇) 的数量: {num_noise}\n")
+    logger.info(f"-1 数量: {num_noise}\n")
 
     return image_pseudo_labels
