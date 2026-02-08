@@ -18,6 +18,6 @@ torchrun \
   --root_dir ./re_id \
   --num_epoch 35 \
   --cluster_id_mode "cluster" \
-  --massage "用来消融DBSCAN的超参" \
+  --massage "用来测试新方法" \
 #instance  / cluster/unique_noise \
   # --config configs/PS_cuhk_pedes.yaml \
