@@ -86,7 +86,7 @@ itc_itm_topk: 8
 # - 0.0：完全不用 ITM affinity（等价于关闭 itc_use_itm_affinity）
 # - 1.0：几乎完全相信 teacher ITM affinity（通常过激进，易不稳）
 # 常用稳定范围：0.1 ~ 0.5
-itc_itm_beta: 0.2
+itc_itm_beta: 0.1
 
 # ITC 的“正样本 gating”阈值：用 teacher 对正配对 (i, t_i) 的匹配概率 p_m(i,t_i)
 # 生成样本权重 w_pos，对每个样本的 ITC loss 做加权平均以降低噪声影响。
@@ -97,8 +97,8 @@ itc_itm_beta: 0.2
 # 调参建议：
 # - 如果发现大部分 w_pos 接近 0：阈值太严（可降到 0.2/0.6）
 # - 如果训练不稳定/噪声大：阈值可更严（如 0.4/0.8）
-itc_itm_gate_tau_low: 0.5
-itc_itm_gate_tau_high: 0.8
+itc_itm_gate_tau_low: 0.1
+itc_itm_gate_tau_high: 0.5
 
 
 # =========================
@@ -115,7 +115,7 @@ itm_use_distill: true
 # - 0.0：纯硬标签
 # - 1.0：纯模仿 teacher（如果 teacher 早期较弱，可能导致“自证循环”）
 # 常用范围：0.3 ~ 0.7
-itm_distill_lambda: 0.3
+itm_distill_lambda: 0.2
 
 # ITM 的“假负样本降权”阈值 tau：针对负样本对 (i, t_neg) / (i_neg, t)
 # teacher 给出 match 概率 p_neg：
@@ -124,12 +124,12 @@ itm_distill_lambda: 0.3
 # tau 越低：越激进地过滤/降权负样本（更稳但可能放过 hard negatives）
 # tau 越高：越保守（只有 teacher 很确信时才降权）
 # 常用范围：0.5 ~ 0.8
-itm_neg_filter_tau: 0.8
+itm_neg_filter_tau: 0.9
 
 # ITM 的“正样本 gating”阈值：同 ITC 一样，用 teacher 对正配对 (i, t_i) 的匹配概率
 # 生成 w_pos，对 ITM 的正样本损失进行降噪加权。
 # 公式：w_pos = clamp((p - tau_low) / (tau_high - tau_low), 0, 1)
-itm_gate_tau_low: 0.5
-itm_gate_tau_high: 0.8
+itm_gate_tau_low: 0.1
+itm_gate_tau_high: 0.5
 
 
