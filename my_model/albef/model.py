@@ -140,6 +140,10 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
 
         # --- 新增：ITM->ITC 的配置 ---
         use_itm_affinity = bool(config.get('itc_use_itm_affinity', True))     # 是否把 teacher ITM affinity 融入 ITC targets
+        if use_itm_affinity and epoch>=config.get('enable_use_itm_affinity',0) :
+            use_itm_affinity=True
+        else:
+            use_itm_affinity=False
         itm_topk         = int(config.get('itc_itm_topk', 8))                 # top-k 候选（batch 内）
         itm_beta         = float(config.get('itc_itm_beta', 0.35))            # affinity 融合权重
         gate_tau_low     = float(config.get('itc_itm_gate_tau_low', 0.3))     # gating 低阈

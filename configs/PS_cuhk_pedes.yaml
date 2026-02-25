@@ -63,7 +63,7 @@ cluster_fusion_use_proj : False   # 保持“融合 CLS 原始特征”
 cluster_min_samples : 4
 cluster_eps : 0.6
 
-
+enable_use_itm_affinity : 5 #启用的epoch默认是0 
 enable_itm_loss: True
 # =========================
 # ITC（图文对比学习）+ teacher(动量) ITM 亲和度融合
