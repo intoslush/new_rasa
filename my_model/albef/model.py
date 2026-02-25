@@ -96,7 +96,9 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
         text_atts = text2['attention_mask']
         idx = batch['person_id']
         replace = batch['replace_flag']
-        idx = batch['pseudo_label']  # 覆盖为伪标签，保持原逻辑
+        idx = batch['image_id']#覆盖为图像 id，保持原逻辑：同一图的多条描述共享一个 id 
+        # idx = batch['pseudo_label']  # 覆盖为伪标签，保持原逻辑
+        
 
         # extract image features
         image_embeds = self.visual_encoder(image1,register_blk=-1)

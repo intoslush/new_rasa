@@ -105,36 +105,36 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
                 logger.info("config (repr):\n%s", pprint.pformat(config, width=120))
 
             logger.info("========== [End dump] ==========")
-        # =======================================================
-        if epoch<5 or epoch%2==1:
-            image_pseudo_labels = generate_and_broadcast_pseudo_labels(
-                epoch=epoch,
-                device=device,
-                is_main=is_main,
-                is_distributed=is_distributed,
-                rank=rank,
-                cluster_loader=cluster_loader,
-                model=model,
-                args=args,
-                config=config,
-                logger=logger,
-                tb_writer=tb_writer,
-                enable_nmi_ari=True,
-                cluster_until_epoch=50,
-            )
-            train_loader.dataset.mode = 'train'
-            train_loader.dataset.set_pseudo_labels(image_pseudo_labels.cpu())
+        # # =======================================================
+        # if epoch<5 or epoch%2==1:
+        #     image_pseudo_labels = generate_and_broadcast_pseudo_labels(
+        #         epoch=epoch,
+        #         device=device,
+        #         is_main=is_main,
+        #         is_distributed=is_distributed,
+        #         rank=rank,
+        #         cluster_loader=cluster_loader,
+        #         model=model,
+        #         args=args,
+        #         config=config,
+        #         logger=logger,
+        #         tb_writer=tb_writer,
+        #         enable_nmi_ari=True,
+        #         cluster_until_epoch=50,
+        #     )
+        #     train_loader.dataset.mode = 'train'
+        #     train_loader.dataset.set_pseudo_labels(image_pseudo_labels.cpu())
 
-            if bool(config.get('reset_queue_each_epoch', True)):
-                if is_distributed:
-                    dist.barrier()
-                model.reset_queues(random_init=bool(config.get('queue_random_reinit', False)))
-                if is_main:
-                    logger.info(
-                        f"[Rank {rank}] 已清空对比队列 (random_init={bool(config.get('queue_random_reinit', False))})"
-                    )
-                if is_distributed:
-                    dist.barrier()
+        #     if bool(config.get('reset_queue_each_epoch', True)):
+        #         if is_distributed:
+        #             dist.barrier()
+        #         model.reset_queues(random_init=bool(config.get('queue_random_reinit', False)))
+        #         if is_main:
+        #             logger.info(
+        #                 f"[Rank {rank}] 已清空对比队列 (random_init={bool(config.get('queue_random_reinit', False))})"
+        #             )
+        #         if is_distributed:
+        #             dist.barrier()
         if is_distributed:
             dist.barrier()
             if hasattr(train_loader, 'sampler') and hasattr(train_loader.sampler, 'set_valid_indices'):

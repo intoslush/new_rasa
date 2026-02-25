@@ -52,8 +52,8 @@ enable_cl_loss: True
 itm_neg_sampling  : 'cl' # 一个参数决定采样方式：'cl' or 'random'，如果关cl需要改为random
 
 enable_mlm_loss:  True
-saliency_compute_epoch: 10 #计算saliency的epoch
-debug_mask_epoch: 10  #用来输出可视化的mask词的epoch
+saliency_compute_epoch: 40 #计算saliency的epoch
+debug_mask_epoch: 40  #用来输出可视化的mask词的epoch
 mlm_soft_label: False
 debug_log_saliency: False  #用来输出可视化的mask词
 
