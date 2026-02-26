@@ -95,31 +95,13 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
         text2 = self.tokenizer(batch['caption2'], padding='longest', max_length=config['max_words'], return_tensors="pt").to(image1.device)
         text_atts = text2['attention_mask']
         idx = batch['person_id']
-        replace = batch['replace_flag']
-        idx = batch['image_id']#覆盖为图像 id，保持原逻辑：同一图的多条描述共享一个 id 
-        # idx = batch['pseudo_label']  # 覆盖为伪标签，保持原逻辑
+        # idx = batch['image_id']#覆盖为图像 id，保持原逻辑：同一图的多条描述共享一个 id 
+        idx = batch['pseudo_label']  # 覆盖为伪标签，保持原逻辑
         
 
         # extract image features
         image_embeds = self.visual_encoder(image1,register_blk=-1)
-        # === 图像显著性：从 CLS→patch attention 中抽 ===
-        attn = self.visual_encoder.blocks[-1].attn.get_attention_map()
-        attn_mean = attn.mean(dim=1)              # [B, N, N]
-        patch_scores = attn_mean[:, 0, 1:]        # [B, P] CLS→所有 patch 的权重
-
-        B, P = patch_scores.shape
-        min_v = patch_scores.view(B, -1).min(dim=-1, keepdim=True)[0]
-        max_v = patch_scores.view(B, -1).max(dim=-1, keepdim=True)[0]
-        patch_scores = (patch_scores - min_v) / (max_v - min_v + 1e-6)  # [B, P] ∈ [0,1]
-
-        # 拼 CLS 的显著性（简单置 1），并 detach，防止梯度回流到 attn
-        saliency_image = torch.cat(
-            [
-                torch.ones(B, 1, device=image1.device, dtype=patch_scores.dtype),
-                patch_scores,
-            ],
-            dim=1,      # [B, 1+P]，和 image_embeds 的 token 数对齐
-        ).detach()
+        
         
         
         image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(image1.device)
@@ -417,9 +399,6 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
             # 纯硬标签 CE
             loss_itm = F.cross_entropy(vl_output, itm_labels)
             loss_dict['loss_itm'] = loss_itm
-
-            # 正样本 logits，用于后面的 ITM consistency
-            vl_output_pos_full = vl_output[:bs].detach()
 
 
         return loss_dict
