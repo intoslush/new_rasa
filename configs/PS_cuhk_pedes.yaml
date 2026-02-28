@@ -52,8 +52,8 @@ enable_cl_loss: True
 itm_neg_sampling  : 'cl' # 一个参数决定采样方式：'cl' or 'random'，如果关cl需要改为random
 
 enable_mlm_loss:  True
-saliency_compute_epoch: 40 #计算saliency的epoch
-debug_mask_epoch: 40  #用来输出可视化的mask词的epoch
+saliency_compute_epoch: 10 #计算saliency的epoch
+debug_mask_epoch: 10  #用来输出可视化的mask词的epoch
 mlm_soft_label: False
 debug_log_saliency: False  #用来输出可视化的mask词
 
@@ -66,3 +66,11 @@ cluster_eps : 0.6
 
 enable_itm_loss: True
 
+enable_itm_gate: True
+itm_gate_start_epoch: 10
+itm_gate_margin_pos: 0.10     # 对角自适应阈值：thr_i = clamp(p_diag[i]-margin, min=tau_pos)
+itm_gate_tau_pos: 0.30
+itm_gate_chunk: 128           # 计算 B^2 pair 时的 chunk，B=16 时随便
+use_image_id_pos: True        # 强正样：同 image_id 永远正
+queue_use_conf: True          # queue positives 用 conf 加权
+conf_min: 0.05                # 防止 conf 过小把正样全干掉

@@ -70,15 +70,23 @@ class QueueMixin:
             torch.distributed.broadcast(self.idx_queue, src=0)
             torch.distributed.broadcast(self.queue_ptr, src=0)
 
-@torch.no_grad()
-def concat_all_gather(tensor):
-    """
-    Performs all_gather operation on the provided tensors.
-    *** Warning ***: torch.distributed.all_gather has no gradient.
-    """
-    tensors_gather = [torch.ones_like(tensor)
-                      for _ in range(torch.distributed.get_world_size())]
-    torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
+import torch
+import torch.distributed as dist
 
+@torch.no_grad()
+def concat_all_gather(tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Performs all_gather operation on the provided tensors and concatenates them.
+    If distributed is not available/initialized (single process), return tensor itself.
+    """
+    if (not dist.is_available()) or (not dist.is_initialized()):
+        return tensor
+
+    world_size = dist.get_world_size()
+    if world_size == 1:
+        return tensor
+
+    tensors_gather = [torch.zeros_like(tensor) for _ in range(world_size)]
+    dist.all_gather(tensors_gather, tensor, async_op=False)
     output = torch.cat(tensors_gather, dim=0)
     return output

@@ -17,7 +17,7 @@ torchrun \
   --dataset_name $DATASET_NAME \
   --root_dir ./re_id \
   --num_epoch 35 \
-  --cluster_id_mode "cluster" \
-  --massage "用来消融DBSCAN的超参" \
+  --cluster_id_mode "unique_noise" \
+  --massage "试试新方法" \
 #instance  / cluster/unique_noise \
   # --config configs/PS_cuhk_pedes.yaml \

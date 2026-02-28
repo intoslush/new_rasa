@@ -176,7 +176,7 @@ def generate_and_broadcast_pseudo_labels(
 
             # 可选：伪标签质量监控（建议用 raw_for_metrics）
             if hasattr(cluster_loader.dataset, 'pairs'):
-                gt_persons = np.array([p for _, _, p in cluster_loader.dataset.pairs], dtype=np.int64)
+                gt_persons = np.array([p for _, _, p,_ in cluster_loader.dataset.pairs], dtype=np.int64)
 
                 # 注意：instance 模式下 raw_for_metrics=None，此时“聚类质量”指标意义不同，
                 # 这里选择跳过（你也可以改为对 final_pseudo_np 计算，但指标会退化且难解释）
