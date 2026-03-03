@@ -267,8 +267,11 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
         probability_matrix = None 
         saliency_compute_epoch = config.get('saliency_compute_epoch', 5)
         if epoch > saliency_compute_epoch :#and bool(config.get('enable_mlm_loss', False))
-            with torch.no_grad():
-                saliency = self.compute_cross_modal_groundedness(
+            was_train = self.text_encoder.training
+            self.text_encoder.eval()
+            try:
+                with torch.no_grad():
+                    saliency = self.compute_cross_modal_groundedness(
                     text_ids=text1['input_ids'],
                     attention_mask=text1['attention_mask'],
                     image_embeds=image_embeds,
@@ -278,7 +281,8 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                     use_entropy=bool(config.get("grounded_use_entropy", True)),
                     use_patch_saliency=bool(config.get("grounded_use_patch_saliency", False)),
                 )
-
+            finally:
+                self.text_encoder.train(was_train)
             probability_matrix = self.build_curriculum_mask_probs(
                 saliency=saliency,
                 attention_mask=text1['attention_mask'],
