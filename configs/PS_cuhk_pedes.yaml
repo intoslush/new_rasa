@@ -66,3 +66,10 @@ cluster_eps : 0.6
 
 enable_itm_loss: True
 
+rectify_epoch: 5 
+rectify_gamma: 2.0 
+rectify_topk: 1 
+rectify_tau: 0.90
+rectify_keep_diag: True
+
+
