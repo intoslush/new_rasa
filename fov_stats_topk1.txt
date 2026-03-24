@@ -1,0 +1,321 @@
+
+
+====================================================================================================
+epoch=10 | train_rectify_topk=0 | analysis_topk=1
+[raw counts]
+coarse_pos_total=912
+coarse_fp_total=822
+pruned_total=570
+pruned_true_fp_total=554
+pruned_false_kill_total=16
+eligible_nonpos_total=1020768
+eligible_fn_total=16
+verified_total=68112
+verified_true_fn_total=14
+rescued_total=316
+rescued_true_fn_total=2
+rescued_false_alarm_total=314
+[paper metrics]
+prune_ratio=0.625000
+prune_precision=0.971930
+candidate_ratio=0.066726
+acceptance_rate=0.004639
+rescue_precision=0.006329
+rescue_recall_at_cand=0.142857
+[extra metrics]
+prune_recall_over_fp=0.673966
+rescue_recall_over_all_fn=0.125000
+[absolute answers]
+successful_fp_suppressed=554
+successful_fn_rescued=2
+
+====================================================================================================
+epoch=11 | train_rectify_topk=0 | analysis_topk=1
+[raw counts]
+coarse_pos_total=958
+coarse_fp_total=898
+pruned_total=718
+pruned_true_fp_total=706
+pruned_false_kill_total=12
+eligible_nonpos_total=1020722
+eligible_fn_total=22
+verified_total=68112
+verified_true_fn_total=18
+rescued_total=296
+rescued_true_fn_total=4
+rescued_false_alarm_total=292
+[paper metrics]
+prune_ratio=0.749478
+prune_precision=0.983287
+candidate_ratio=0.066729
+acceptance_rate=0.004346
+rescue_precision=0.013514
+rescue_recall_at_cand=0.222222
+[extra metrics]
+prune_recall_over_fp=0.786192
+rescue_recall_over_all_fn=0.181818
+[absolute answers]
+successful_fp_suppressed=706
+successful_fn_rescued=4
+
+====================================================================================================
+epoch=12 | train_rectify_topk=0 | analysis_topk=1
+[raw counts]
+coarse_pos_total=916
+coarse_fp_total=828
+pruned_total=672
+pruned_true_fp_total=664
+pruned_false_kill_total=8
+eligible_nonpos_total=1020764
+eligible_fn_total=10
+verified_total=68112
+verified_true_fn_total=8
+rescued_total=270
+rescued_true_fn_total=2
+rescued_false_alarm_total=268
+[paper metrics]
+prune_ratio=0.733624
+prune_precision=0.988095
+candidate_ratio=0.066726
+acceptance_rate=0.003964
+rescue_precision=0.007407
+rescue_recall_at_cand=0.250000
+[extra metrics]
+prune_recall_over_fp=0.801932
+rescue_recall_over_all_fn=0.200000
+[absolute answers]
+successful_fp_suppressed=664
+successful_fn_rescued=2
+
+====================================================================================================
+epoch=13 | train_rectify_topk=0 | analysis_topk=1
+[raw counts]
+coarse_pos_total=714
+coarse_fp_total=670
+pruned_total=538
+pruned_true_fp_total=530
+pruned_false_kill_total=8
+eligible_nonpos_total=1020966
+eligible_fn_total=14
+verified_total=68112
+verified_true_fn_total=12
+rescued_total=263
+rescued_true_fn_total=1
+rescued_false_alarm_total=262
+[paper metrics]
+prune_ratio=0.753501
+prune_precision=0.985130
+candidate_ratio=0.066713
+acceptance_rate=0.003861
+rescue_precision=0.003802
+rescue_recall_at_cand=0.083333
+[extra metrics]
+prune_recall_over_fp=0.791045
+rescue_recall_over_all_fn=0.071429
+[absolute answers]
+successful_fp_suppressed=530
+successful_fn_rescued=1
+
+====================================================================================================
+epoch=14 | train_rectify_topk=0 | analysis_topk=1
+[raw counts]
+coarse_pos_total=706
+coarse_fp_total=624
+pruned_total=546
+pruned_true_fp_total=530
+pruned_false_kill_total=16
+eligible_nonpos_total=1020974
+eligible_fn_total=20
+verified_total=68112
+verified_true_fn_total=15
+rescued_total=235
+rescued_true_fn_total=2
+rescued_false_alarm_total=233
+[paper metrics]
+prune_ratio=0.773371
+prune_precision=0.970696
+candidate_ratio=0.066713
+acceptance_rate=0.003450
+rescue_precision=0.008511
+rescue_recall_at_cand=0.133333
+[extra metrics]
+prune_recall_over_fp=0.849359
+rescue_recall_over_all_fn=0.100000
+[absolute answers]
+successful_fp_suppressed=530
+successful_fn_rescued=2
+
+====================================================================================================
+epoch=15 | train_rectify_topk=0 | analysis_topk=1
+[raw counts]
+coarse_pos_total=648
+coarse_fp_total=584
+pruned_total=508
+pruned_true_fp_total=492
+pruned_false_kill_total=16
+eligible_nonpos_total=1021032
+eligible_fn_total=22
+verified_total=68112
+verified_true_fn_total=17
+rescued_total=235
+rescued_true_fn_total=11
+rescued_false_alarm_total=224
+[paper metrics]
+prune_ratio=0.783951
+prune_precision=0.968504
+candidate_ratio=0.066709
+acceptance_rate=0.003450
+rescue_precision=0.046809
+rescue_recall_at_cand=0.647059
+[extra metrics]
+prune_recall_over_fp=0.842466
+rescue_recall_over_all_fn=0.500000
+[absolute answers]
+successful_fp_suppressed=492
+successful_fn_rescued=11
+
+====================================================================================================
+epoch=16 | train_rectify_topk=0 | analysis_topk=1
+[raw counts]
+coarse_pos_total=676
+coarse_fp_total=594
+pruned_total=550
+pruned_true_fp_total=532
+pruned_false_kill_total=18
+eligible_nonpos_total=1021004
+eligible_fn_total=28
+verified_total=68112
+verified_true_fn_total=21
+rescued_total=186
+rescued_true_fn_total=2
+rescued_false_alarm_total=184
+[paper metrics]
+prune_ratio=0.813609
+prune_precision=0.967273
+candidate_ratio=0.066711
+acceptance_rate=0.002731
+rescue_precision=0.010753
+rescue_recall_at_cand=0.095238
+[extra metrics]
+prune_recall_over_fp=0.895623
+rescue_recall_over_all_fn=0.071429
+[absolute answers]
+successful_fp_suppressed=532
+successful_fn_rescued=2
+
+====================================================================================================
+epoch=17 | train_rectify_topk=0 | analysis_topk=1
+[raw counts]
+coarse_pos_total=600
+coarse_fp_total=530
+pruned_total=480
+pruned_true_fp_total=458
+pruned_false_kill_total=22
+eligible_nonpos_total=1021080
+eligible_fn_total=10
+verified_total=68112
+verified_true_fn_total=8
+rescued_total=198
+rescued_true_fn_total=1
+rescued_false_alarm_total=197
+[paper metrics]
+prune_ratio=0.800000
+prune_precision=0.954167
+candidate_ratio=0.066706
+acceptance_rate=0.002907
+rescue_precision=0.005051
+rescue_recall_at_cand=0.125000
+[extra metrics]
+prune_recall_over_fp=0.864151
+rescue_recall_over_all_fn=0.100000
+[absolute answers]
+successful_fp_suppressed=458
+successful_fn_rescued=1
+
+====================================================================================================
+epoch=18 | train_rectify_topk=0 | analysis_topk=1
+[raw counts]
+coarse_pos_total=606
+coarse_fp_total=538
+pruned_total=530
+pruned_true_fp_total=506
+pruned_false_kill_total=24
+eligible_nonpos_total=1021074
+eligible_fn_total=6
+verified_total=68112
+verified_true_fn_total=3
+rescued_total=167
+rescued_true_fn_total=0
+rescued_false_alarm_total=167
+[paper metrics]
+prune_ratio=0.874587
+prune_precision=0.954717
+candidate_ratio=0.066706
+acceptance_rate=0.002452
+rescue_precision=0.000000
+rescue_recall_at_cand=0.000000
+[extra metrics]
+prune_recall_over_fp=0.940520
+rescue_recall_over_all_fn=0.000000
+[absolute answers]
+successful_fp_suppressed=506
+successful_fn_rescued=0
+
+====================================================================================================
+epoch=19 | train_rectify_topk=0 | analysis_topk=1
+[raw counts]
+coarse_pos_total=596
+coarse_fp_total=518
+pruned_total=508
+pruned_true_fp_total=482
+pruned_false_kill_total=26
+eligible_nonpos_total=1021084
+eligible_fn_total=18
+verified_total=68112
+verified_true_fn_total=12
+rescued_total=175
+rescued_true_fn_total=3
+rescued_false_alarm_total=172
+[paper metrics]
+prune_ratio=0.852349
+prune_precision=0.948819
+candidate_ratio=0.066706
+acceptance_rate=0.002569
+rescue_precision=0.017143
+rescue_recall_at_cand=0.250000
+[extra metrics]
+prune_recall_over_fp=0.930502
+rescue_recall_over_all_fn=0.166667
+[absolute answers]
+successful_fp_suppressed=482
+successful_fn_rescued=3
+
+====================================================================================================
+epoch=20 | train_rectify_topk=0 | analysis_topk=1
+[raw counts]
+coarse_pos_total=618
+coarse_fp_total=534
+pruned_total=510
+pruned_true_fp_total=482
+pruned_false_kill_total=28
+eligible_nonpos_total=1021062
+eligible_fn_total=14
+verified_total=68112
+verified_true_fn_total=11
+rescued_total=160
+rescued_true_fn_total=6
+rescued_false_alarm_total=154
+[paper metrics]
+prune_ratio=0.825243
+prune_precision=0.945098
+candidate_ratio=0.066707
+acceptance_rate=0.002349
+rescue_precision=0.037500
+rescue_recall_at_cand=0.545455
+[extra metrics]
+prune_recall_over_fp=0.902622
+rescue_recall_over_all_fn=0.428571
+[absolute answers]
+successful_fp_suppressed=482
+successful_fn_rescued=6
+

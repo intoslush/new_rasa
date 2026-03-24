@@ -60,15 +60,15 @@ debug_log_saliency: False  #用来输出可视化的mask词
 cluster_feature_mode : "image"
 cluster_fusion_use_proj : False   # 保持“融合 CLS 原始特征”
 # cluster_text_key : "caption1"     # 也可改 caption1
-cluster_min_samples : 3
+cluster_min_samples : 4
 cluster_eps : 0.6
 
 
 enable_itm_loss: True
 
-rectify_epoch: 10 
+rectify_epoch: 1 
 rectify_gamma: 2.0 
-rectify_topk: 1 
+rectify_topk: 0 
 rectify_tau: 0.90
 rectify_keep_diag: True
 

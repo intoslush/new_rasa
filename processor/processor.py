@@ -20,7 +20,7 @@ from .pseudo import generate_and_broadcast_pseudo_labels
 from .eval_hooks import evaluate_and_checkpoint
 from io import StringIO
 import pprint
-
+import time
 def _setup_optim_sched(config: Dict[str, Any], model):
     arg_opt = utils.AttrDict(config['optimizer'])
     optimizer = create_optimizer(arg_opt, model)
@@ -153,7 +153,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
         # ========== 4) 进入训练态 ==========
         model.train()
         logger.info(f"[Rank {rank}] 开始 epoch {epoch} mini-batch 循环")
-
+        model.reset_fov_epoch_stats()
         dynamic_weights = compute_dynamic_weights(
             epoch=epoch,
             num_epoch=num_epoch,
@@ -163,7 +163,17 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
         if tb_writer is not None and is_main:
             _tb(tb_writer, dynamic_weights, "Weights", epoch)
             logger.info(f"[Rank {rank}] epoch {epoch} 使用的 loss 权重: {dynamic_weights}")
+        
+        # 🌟 新增 1：初始化时间累计，并重置当前设备的显存峰值统计
+        epoch_total_time = 0.0
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(device)
+            
         for n_iter, batch in enumerate(train_loader):
+            # 🌟 新增 2：在 forward 和数据搬运前，同步 CUDA 并记录开始时间
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(device)
+            iter_start_time = time.time()
             # move to device
             batch = {k: (v.to(device, non_blocking=True) if hasattr(v, 'to') else v) for k, v in batch.items()}
             if epoch > 0 or not config.get('warm_up', False):
@@ -211,8 +221,48 @@ def do_train(start_epoch, args, model, train_loader, evaluator, checkpointer, cl
 
             # 释放临时变量
             del loss_dict, loss
+            # 🌟 新增 3：在 iter 结束时再次同步 GPU，计算并累加耗时
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(device)
+            iter_end_time = time.time()
+            epoch_total_time += (iter_end_time - iter_start_time)
+            
+        # 🌟 新增 4：计算一个 epoch 的平均耗时和显存峰值
+        avg_time_per_iter = epoch_total_time / len(train_loader)
+        peak_memory_gb = 0.0
+        if torch.cuda.is_available():
+            # 获取自上次 reset 以来的显存峰值，并转换为 GB (1024^3 字节)
+            peak_memory_gb = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
+            
+        # 仅在主进程打印论文所需数据
+        if is_main:
+            logger.info(f"========== Epoch {epoch} 效率分析 (Efficiency Metrics) ==========")
+            logger.info(f"Average Time / iter (s) : {avg_time_per_iter:.4f}")
+            logger.info(f"Peak GPU Memory (GB)    : {peak_memory_gb:.4f}")
+            logger.info("===================================================================")
 
         logger.info(f"---------- epoch {epoch} 训练完成 -------------")
+
+        logger.info(f"---------- epoch {epoch} 训练完成 -------------")
+        if hasattr(model, "dump_fov_epoch_stats"):
+            model.dump_fov_epoch_stats(epoch, save_dir=".")
+            epoch_fov_stats = model.get_fov_epoch_stats()
+
+            for k in [1, 2, 3]:
+                s = epoch_fov_stats[k]
+                logger.info(
+                    "[FoV][epoch=%d][analysis_topk=%d] "
+                    "pruned_true_fp=%d / coarse_fp=%d | "
+                    "rescued_true_fn=%d / eligible_fn=%d | "
+                    "prune_ratio=%.6f prune_precision=%.6f | "
+                    "candidate_ratio=%.6f acceptance_rate=%.6f rescue_precision=%.6f rescue_recall@cand=%.6f",
+                    epoch, k,
+                    s['pruned_true_fp_total'], s['coarse_fp_total'],
+                    s['rescued_true_fn_total'], s['eligible_fn_total'],
+                    s['prune_ratio'], s['prune_precision'],
+                    s['candidate_ratio'], s['acceptance_rate'],
+                    s['rescue_precision'], s['rescue_recall_at_cand']
+                )
 
         # ========== 5) 评估与保存 ==========
         with torch.no_grad():

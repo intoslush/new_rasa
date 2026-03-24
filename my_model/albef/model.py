@@ -33,6 +33,7 @@ from .mixins import (
     SoftMaskITMMixin,
 )
 from .mixins.infmask import InfMaskMixin
+import os
 
 
 class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMixin, DebugMaskMixin, InfMaskMixin,SoftMaskITMMixin, nn.Module):
@@ -89,6 +90,10 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
         self.register_buffer('pos_mu', torch.tensor(0.0))
         self.register_buffer('pos_var', torch.tensor(0.0))
         self.register_buffer('rectify_initialized', torch.tensor(0))
+        ######新增
+        self.fov_stat_ks = [1, 2, 3]
+        self._last_rectify_train_k = 1
+        self.reset_fov_epoch_stats()
 
     def forward(self, batch, alpha, config, epoch):# text1/text2相同, img1/img2 同一图不同增广
         loss_dict = {}
@@ -192,8 +197,21 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                     # ========= Dynamic Label Rectification =========
                     rectify_epoch = int(config.get('rectify_epoch', 5))
                     if epoch >= rectify_epoch:
-                        # 1) 统计 batch 内“当前认为的正样本”的相似度分布（更稳定）
-                        current_pos_sims = sim_i2t_m[:, :bs][pos_idx[:, :bs].bool()]
+                        # ------------------------------
+                        # batch-local GT relation for analysis only
+                        # 排除对角线 self-pair，不纳入统计
+                        # ------------------------------
+                        gt_id = batch['person_id'].view(-1, 1)
+                        gt_pos_local_bool = torch.eq(gt_id, gt_id.t())  # [B,B], bool
+
+                        diag_mask = torch.eye(bs, dtype=torch.bool, device=image1.device)
+
+                        pos_idx_local_bool_all = pos_idx[:, :bs].bool()            # 含对角线，仅供训练逻辑使用
+                        coarse_pos_local_bool = pos_idx_local_bool_all & (~diag_mask)  # 统计口径：off-diagonal coarse positives
+                        nonpos_local_bool = (~pos_idx_local_bool_all) & (~diag_mask)   # 统计口径：off-diagonal non-positives
+
+                        # 1) 统计 batch 内“当前认为的正样本”的相似度分布
+                        current_pos_sims = sim_i2t_m[:, :bs][pos_idx_local_bool_all]
                         if current_pos_sims.numel() > 0:
                             batch_mu = current_pos_sims.mean()
                             batch_var = current_pos_sims.var() if current_pos_sims.numel() > 1 else torch.tensor(0.0, device=image1.device)
@@ -209,33 +227,66 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
 
                         sigma = torch.sqrt(self.pos_var + 1e-5)
                         gamma = float(config.get('rectify_gamma', 1.5))
+                        thresh = self.pos_mu - gamma * sigma
 
                         # 2) 假阳性抑制：伪正但分数显著低
-                        fp_mask_i2t = rectified_pos_idx.bool() & (sim_i2t_m < (self.pos_mu - gamma * sigma))
-                        fp_mask_t2i = rectified_pos_idx.bool() & (sim_t2i_m < (self.pos_mu - gamma * sigma))
+                        # 训练逻辑仍然保持原样：在 B x (B+Q) 上做
+                        fp_mask_i2t = rectified_pos_idx.bool() & (sim_i2t_m < thresh)
+                        fp_mask_t2i = rectified_pos_idx.bool() & (sim_t2i_m < thresh)
                         fp_mask = fp_mask_i2t | fp_mask_t2i
                         rectified_pos_idx[fp_mask] = 0.0
 
-                        # （可选但安全）强制对角为正，避免极端阈值误伤
+                        # keep diagonal positive
                         if bool(config.get("rectify_keep_diag", True)):
-                            # rectified_pos_idx 是 [B, B(+Q)]，fill_diagonal_ 只会写前 B 个对角元素
                             rectified_pos_idx.fill_diagonal_(1.0)
 
-                        # 3) 假阴性打捞：Top-K + 动量 ITM 复核
-                        k = int(config.get('rectify_topk', 1))
+                        # ------------------------------
+                        # Pruning stats: 只统计 batch-local, off-diagonal
+                        # effective pruned = 原 coarse positive，但在 prune 后 local 矩阵中变成 0
+                        # ------------------------------
+                        post_prune_local_bool = rectified_pos_idx[:, :bs].bool().clone()
+                        effective_pruned_local_bool = coarse_pos_local_bool & (~post_prune_local_bool)
+
+                        coarse_fp_local_bool = coarse_pos_local_bool & (~gt_pos_local_bool)
+                        pruned_true_fp_local_bool = effective_pruned_local_bool & (~gt_pos_local_bool)
+                        pruned_false_kill_local_bool = effective_pruned_local_bool & gt_pos_local_bool
+
+                        # 3) 假阴性打捞：一次前向同时算 max(train_topk, 3)
+                        train_topk = int(config.get('rectify_topk', 1))
+                        self._last_rectify_train_k = train_topk
+
+                        stats_topk_max = int(config.get('fov_stats_topk_max', 3))  # 默认统计到 topk=3
+                        max_topk_needed = max(train_topk, stats_topk_max)
+                        max_topk_needed = min(max_topk_needed, bs)
+
                         tau = float(config.get('rectify_tau', 0.85))
 
-                        if k > 0:
+                        cand_masks_by_k = {}
+                        rescued_masks_by_k = {}
+
+                        if max_topk_needed > 0:
                             neg_sim_i2t = sim_i2t_m[:, :bs].clone()
-                            neg_sim_i2t[pos_idx[:, :bs].bool()] = -1e4  # 屏蔽原始正样本
-                            _, topk_idx = neg_sim_i2t.topk(k, dim=1)    # [B,K]
+                            neg_sim_i2t[pos_idx_local_bool_all] = -1e4  # 屏蔽原始正样本（含对角）
 
-                            # 准备 ITM 动量头输入
-                            text_embeds_m_rep = text_output_m.last_hidden_state.unsqueeze(1).repeat(1, k, 1, 1).view(bs * k, -1, self.text_width)
-                            text_atts_rep = text2['attention_mask'].unsqueeze(1).repeat(1, k, 1).view(bs * k, -1)
+                            _, topk_idx_all = neg_sim_i2t.topk(max_topk_needed, dim=1)   # [B, maxk]
+                            topk_valid_all = (~pos_idx_local_bool_all).gather(1, topk_idx_all)  # 防止极端情况下选到被 mask 的位置
 
-                            image_embeds_m_gat = image_embeds_m[topk_idx.flatten()]
-                            image_atts_gat = image_atts[topk_idx.flatten()]
+                            # ITM 动量头：一次性算完 max_topk_needed 个候选
+                            text_embeds_m_rep = (
+                                text_output_m.last_hidden_state
+                                .unsqueeze(1)
+                                .repeat(1, max_topk_needed, 1, 1)
+                                .view(bs * max_topk_needed, -1, self.text_width)
+                            )
+                            text_atts_rep = (
+                                text2['attention_mask']
+                                .unsqueeze(1)
+                                .repeat(1, max_topk_needed, 1)
+                                .view(bs * max_topk_needed, -1)
+                            )
+
+                            image_embeds_m_gat = image_embeds_m[topk_idx_all.reshape(-1)]
+                            image_atts_gat = image_atts[topk_idx_all.reshape(-1)]
 
                             output_m_cross = self.text_encoder_m.bert(
                                 encoder_embeds=text_embeds_m_rep,
@@ -246,14 +297,67 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
                                 mode='fusion'
                             )
                             itm_m_logits = self.itm_head_m(output_m_cross.last_hidden_state[:, 0, :])
-                            itm_m_probs = F.softmax(itm_m_logits, dim=1)[:, 1]
+                            itm_m_probs_all = F.softmax(itm_m_logits, dim=1)[:, 1].view(bs, max_topk_needed)
 
-                            fn_mask_flat = (itm_m_probs > tau).view(bs, k)
-                            for i in range(bs):
-                                for j in range(k):
-                                    if fn_mask_flat[i, j]:
-                                        rectified_pos_idx[i, topk_idx[i, j]] = 1.0
+                            # ---- 实际训练只使用 config['rectify_topk'] ----
+                            actual_k = min(train_topk, max_topk_needed)
+                            if actual_k > 0:
+                                actual_rescue_prefix = topk_valid_all[:, :actual_k] & (itm_m_probs_all[:, :actual_k] > tau)
+                                actual_rescued_mask = torch.zeros((bs, bs), dtype=torch.bool, device=image1.device)
+                                actual_rescued_mask.scatter_(1, topk_idx_all[:, :actual_k], actual_rescue_prefix)
+                                rectified_pos_idx[:, :bs][actual_rescued_mask] = 1.0
 
+                            # ---- 统计 top-k=1,2,3 ----
+                            for stat_k in self.fov_stat_ks:
+                                eff_k = min(int(stat_k), max_topk_needed)
+
+                                cand_mask_k = torch.zeros((bs, bs), dtype=torch.bool, device=image1.device)
+                                rescued_mask_k = torch.zeros((bs, bs), dtype=torch.bool, device=image1.device)
+
+                                if eff_k > 0:
+                                    cand_prefix = topk_valid_all[:, :eff_k]
+                                    cand_mask_k.scatter_(1, topk_idx_all[:, :eff_k], cand_prefix)
+
+                                    rescued_prefix = cand_prefix & (itm_m_probs_all[:, :eff_k] > tau)
+                                    rescued_mask_k.scatter_(1, topk_idx_all[:, :eff_k], rescued_prefix)
+
+                                # 只保留 off-diagonal event
+                                cand_mask_k = cand_mask_k & (~diag_mask)
+                                rescued_mask_k = rescued_mask_k & (~diag_mask)
+
+                                cand_masks_by_k[int(stat_k)] = cand_mask_k
+                                rescued_masks_by_k[int(stat_k)] = rescued_mask_k
+                        else:
+                            for stat_k in self.fov_stat_ks:
+                                cand_masks_by_k[int(stat_k)] = torch.zeros((bs, bs), dtype=torch.bool, device=image1.device)
+                                rescued_masks_by_k[int(stat_k)] = torch.zeros((bs, bs), dtype=torch.bool, device=image1.device)
+
+                        # ------------------------------
+                        # Rescue stats: 只统计 batch-local, off-diagonal
+                        # ------------------------------
+                        eligible_fn_local_bool = nonpos_local_bool & gt_pos_local_bool
+
+                        for stat_k in self.fov_stat_ks:
+                            cand_mask_k = cand_masks_by_k[int(stat_k)]
+                            rescued_mask_k = rescued_masks_by_k[int(stat_k)]
+
+                            verified_true_fn_local_bool = cand_mask_k & gt_pos_local_bool
+                            rescued_true_fn_local_bool = rescued_mask_k & gt_pos_local_bool
+                            rescued_false_alarm_local_bool = rescued_mask_k & (~gt_pos_local_bool)
+
+                            self._add_fov_stat(stat_k, 'coarse_pos_total', coarse_pos_local_bool.sum().item())
+                            self._add_fov_stat(stat_k, 'coarse_fp_total', coarse_fp_local_bool.sum().item())
+                            self._add_fov_stat(stat_k, 'pruned_total', effective_pruned_local_bool.sum().item())
+                            self._add_fov_stat(stat_k, 'pruned_true_fp_total', pruned_true_fp_local_bool.sum().item())
+                            self._add_fov_stat(stat_k, 'pruned_false_kill_total', pruned_false_kill_local_bool.sum().item())
+
+                            self._add_fov_stat(stat_k, 'eligible_nonpos_total', nonpos_local_bool.sum().item())
+                            self._add_fov_stat(stat_k, 'eligible_fn_total', eligible_fn_local_bool.sum().item())
+                            self._add_fov_stat(stat_k, 'verified_total', cand_mask_k.sum().item())
+                            self._add_fov_stat(stat_k, 'verified_true_fn_total', verified_true_fn_local_bool.sum().item())
+                            self._add_fov_stat(stat_k, 'rescued_total', rescued_mask_k.sum().item())
+                            self._add_fov_stat(stat_k, 'rescued_true_fn_total', rescued_true_fn_local_bool.sum().item())
+                            self._add_fov_stat(stat_k, 'rescued_false_alarm_total', rescued_false_alarm_local_bool.sum().item())
                     # 重整后的 hard targets
                     sim_targets_rect = rectified_pos_idx / (rectified_pos_idx.sum(1, keepdim=True) + 1e-8)
 
@@ -509,3 +613,104 @@ class ALBEF(VisionBuilderMixin, MomentumMixin, QueueMixin, MLMMixin, SaliencyMix
             loss_dict['loss_itm'] = loss_itm
 
         return loss_dict
+    def _make_empty_fov_counter(self):
+        return {
+            'coarse_pos_total': 0,            # batch-local, off-diagonal coarse positives
+            'coarse_fp_total': 0,             # 上面这些 coarse positives 里真实为负的数量
+            'pruned_total': 0,                # 实际被 prune 掉的数量
+            'pruned_true_fp_total': 0,        # 被 prune 且真实为负（成功剪掉的假正）
+            'pruned_false_kill_total': 0,     # 被 prune 但真实为正（误杀）
+
+            'eligible_nonpos_total': 0,       # batch-local, off-diagonal non-positives
+            'eligible_fn_total': 0,           # 上面这些 non-positives 里真实为正（潜在假负）
+            'verified_total': 0,              # 被送入 verifier 的候选数
+            'verified_true_fn_total': 0,      # 候选池中真实为正的数量
+            'rescued_total': 0,               # 最终被 rescue 为正的数量
+            'rescued_true_fn_total': 0,       # 被 rescue 且真实为正（成功救回的假负）
+            'rescued_false_alarm_total': 0,   # 被 rescue 但真实为负（误救）
+        }
+
+
+    def reset_fov_epoch_stats(self):
+        self.fov_epoch_stats = {
+            int(k): self._make_empty_fov_counter()
+            for k in getattr(self, 'fov_stat_ks', [1, 2, 3])
+        }
+
+
+    def _add_fov_stat(self, topk, name, value):
+        topk = int(topk)
+        if topk not in self.fov_epoch_stats:
+            self.fov_epoch_stats[topk] = self._make_empty_fov_counter()
+        self.fov_epoch_stats[topk][name] += int(value)
+
+
+    @staticmethod
+    def _safe_div(num, den):
+        return float(num) / float(den) if int(den) > 0 else 0.0
+
+
+    def get_fov_epoch_stats(self):
+        out = {}
+        for k, raw in self.fov_epoch_stats.items():
+            d = {kk: int(v) for kk, v in raw.items()}
+
+            d['prune_ratio'] = self._safe_div(d['pruned_total'], d['coarse_pos_total'])
+            d['prune_precision'] = self._safe_div(d['pruned_true_fp_total'], d['pruned_total'])
+            d['prune_recall_over_fp'] = self._safe_div(d['pruned_true_fp_total'], d['coarse_fp_total'])
+
+            d['candidate_ratio'] = self._safe_div(d['verified_total'], d['eligible_nonpos_total'])
+            d['acceptance_rate'] = self._safe_div(d['rescued_total'], d['verified_total'])
+            d['rescue_precision'] = self._safe_div(d['rescued_true_fn_total'], d['rescued_total'])
+            d['rescue_recall_at_cand'] = self._safe_div(d['rescued_true_fn_total'], d['verified_true_fn_total'])
+            d['rescue_recall_over_all_fn'] = self._safe_div(d['rescued_true_fn_total'], d['eligible_fn_total'])
+
+            # 便于直接看绝对数
+            d['successful_fp_suppressed'] = d['pruned_true_fp_total']
+            d['successful_fn_rescued'] = d['rescued_true_fn_total']
+
+            out[int(k)] = d
+        return out
+
+
+    def dump_fov_epoch_stats(self, epoch, save_dir="."):
+        os.makedirs(save_dir, exist_ok=True)
+        all_stats = self.get_fov_epoch_stats()
+        train_topk = int(getattr(self, "_last_rectify_train_k", -1))
+
+        for k, d in all_stats.items():
+            path = os.path.join(save_dir, f"fov_stats_topk{k}.txt")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write("=" * 100 + "\n")
+                f.write(f"epoch={epoch} | train_rectify_topk={train_topk} | analysis_topk={k}\n")
+
+                f.write("[raw counts]\n")
+                f.write(f"coarse_pos_total={d['coarse_pos_total']}\n")
+                f.write(f"coarse_fp_total={d['coarse_fp_total']}\n")
+                f.write(f"pruned_total={d['pruned_total']}\n")
+                f.write(f"pruned_true_fp_total={d['pruned_true_fp_total']}\n")
+                f.write(f"pruned_false_kill_total={d['pruned_false_kill_total']}\n")
+
+                f.write(f"eligible_nonpos_total={d['eligible_nonpos_total']}\n")
+                f.write(f"eligible_fn_total={d['eligible_fn_total']}\n")
+                f.write(f"verified_total={d['verified_total']}\n")
+                f.write(f"verified_true_fn_total={d['verified_true_fn_total']}\n")
+                f.write(f"rescued_total={d['rescued_total']}\n")
+                f.write(f"rescued_true_fn_total={d['rescued_true_fn_total']}\n")
+                f.write(f"rescued_false_alarm_total={d['rescued_false_alarm_total']}\n")
+
+                f.write("[paper metrics]\n")
+                f.write(f"prune_ratio={d['prune_ratio']:.6f}\n")
+                f.write(f"prune_precision={d['prune_precision']:.6f}\n")
+                f.write(f"candidate_ratio={d['candidate_ratio']:.6f}\n")
+                f.write(f"acceptance_rate={d['acceptance_rate']:.6f}\n")
+                f.write(f"rescue_precision={d['rescue_precision']:.6f}\n")
+                f.write(f"rescue_recall_at_cand={d['rescue_recall_at_cand']:.6f}\n")
+
+                f.write("[extra metrics]\n")
+                f.write(f"prune_recall_over_fp={d['prune_recall_over_fp']:.6f}\n")
+                f.write(f"rescue_recall_over_all_fn={d['rescue_recall_over_all_fn']:.6f}\n")
+
+                f.write("[absolute answers]\n")
+                f.write(f"successful_fp_suppressed={d['successful_fp_suppressed']}\n")
+                f.write(f"successful_fn_rescued={d['successful_fn_rescued']}\n\n")
